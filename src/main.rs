@@ -230,7 +230,9 @@ async fn qobuz_download(
     ))?;
 
     let format_id = params.format_id.unwrap_or(6);
-    let output_dir = std::path::PathBuf::from("library");
+    let output_dir = std::path::PathBuf::from(
+        std::env::var("LIBRARY_PATH").unwrap_or_else(|_| "library".into()),
+    );
     std::fs::create_dir_all(&output_dir).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -315,6 +317,7 @@ async fn qobuz_download(
     let final_path = {
         let service = source.service();
         let temp_path_clone = temp_path.clone();
+        let output_dir = output_dir.clone();
         tokio::task::spawn_blocking(move || {
             let mut service = service.blocking_lock();
             if let Ok(track) = service.get_track(track_id) {
@@ -340,9 +343,9 @@ async fn qobuz_download(
                 tag.set_artist(artist.clone());
                 tag.set_album(album.clone());
 
-                // Embed cover art if available
-                if let Some(album) = &track.album {
-                    if let Some(image_url) = album
+                // Cover art
+                if let Some(album_obj) = &track.album {
+                    if let Some(image_url) = album_obj
                         .image
                         .as_ref()
                         .and_then(|img| img.large.as_ref().or(img.small.as_ref()))
@@ -367,11 +370,33 @@ async fn qobuz_download(
                     .save_to_path(&temp_path_clone, WriteOptions::default())
                     .map_err(|e| format!("lofty save: {}", e))?;
 
-                let safe_name = format!("{} - {}.flac", sanitize(&artist), sanitize(&title));
-                let new_path = output_dir.join(safe_name);
+                // Structured path: artist/year/album/NN. title.flac
+                let year = track.album.as_ref()
+                    .and_then(|a| {
+                        a.release_date_original.as_ref()
+                            .and_then(|d| d.split('-').next().map(|s| s.to_string()))
+                            .or_else(|| a.released_at.map(|ts| {
+                                // rough year from unix timestamp
+                                let year = 1970 + (ts / 31_536_000);
+                                year.to_string()
+                            }))
+                    })
+                    .unwrap_or_else(|| "0000".to_string());
+                let track_num = track.track_number.unwrap_or(0);
+                let safe_artist = sanitize(&artist);
+                let safe_album = sanitize(&album);
+                let safe_title = sanitize(&title);
+
+                let dir = output_dir.join(&safe_artist).join(&year).join(&safe_album);
+                std::fs::create_dir_all(&dir).ok();
+
+                let filename = format!("{:02}. {}.flac", track_num, safe_title);
+                let new_path = dir.join(filename);
+
                 std::fs::rename(&temp_path_clone, &new_path).ok();
                 Ok::<_, String>(new_path)
             } else {
+                tracing::info!("get_track FAILED for {}", track_id);
                 Ok(temp_path_clone)
             }
         })
