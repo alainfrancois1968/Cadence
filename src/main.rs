@@ -43,6 +43,12 @@ struct DownloadParams {
     format_id: Option<i32>,
 }
 
+#[derive(Deserialize)]
+struct LibraryStreamParams {
+    id: Option<i64>,
+    path: Option<String>,
+}
+
 fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
@@ -87,6 +93,7 @@ fn main() -> anyhow::Result<()> {
                 .route("/qobuz/download", get(qobuz_download))
                 .route("/library/search", get(library_search))
                 .route("/library/scan", get(library_scan))
+                .route("/library/stream", get(library_stream))
                 .with_state(state);
 
             let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
@@ -441,4 +448,60 @@ async fn library_scan() -> Result<Json<serde_json::Value>, (axum::http::StatusCo
         })?;
 
     Ok(Json(serde_json::json!({ "scanned": count })))
+}
+
+async fn library_stream(
+    Query(params): Query<LibraryStreamParams>,
+) -> Result<impl axum::response::IntoResponse, (axum::http::StatusCode, String)> {
+    let library = library::Library::new("cadence.db").await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("DB error: {}", e),
+        )
+    })?;
+
+    // Resolve path from id or direct path
+    let file_path = if let Some(id) = params.id {
+        // You may want a get_by_id method; for now use search or add one
+        let rows = library
+            .search("")
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        rows.into_iter()
+            .find(|t| t["id"] == id)
+            .and_then(|t| t["path"].as_str().map(|s| s.to_string()))
+            .ok_or((axum::http::StatusCode::NOT_FOUND, "Track not found".into()))?
+    } else if let Some(path) = params.path {
+        path
+    } else {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Provide id or path".into(),
+        ));
+    };
+
+    // Load the whole file into memory
+    let bytes = tokio::fs::read(&file_path).await.map_err(|e| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            format!("Failed to read file: {}", e),
+        )
+    })?;
+
+    let mime = if file_path.ends_with(".flac") {
+        "audio/flac"
+    } else if file_path.ends_with(".wav") {
+        "audio/wav"
+    } else {
+        "application/octet-stream"
+    };
+
+    let body = axum::body::Body::from(bytes);
+    let response = axum::response::Response::builder()
+        .header("Content-Type", mime)
+        .header("Accept-Ranges", "bytes")
+        .body(body)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(response)
 }
