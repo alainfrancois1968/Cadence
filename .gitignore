@@ -1,0 +1,6 @@
+/target
+.env
+*.log
+library/
+downloads/
+.DS_Store
