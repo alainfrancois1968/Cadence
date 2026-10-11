@@ -371,15 +371,20 @@ async fn qobuz_download(
                     .map_err(|e| format!("lofty save: {}", e))?;
 
                 // Structured path: artist/year/album/NN. title.flac
-                let year = track.album.as_ref()
+                let year = track
+                    .album
+                    .as_ref()
                     .and_then(|a| {
-                        a.release_date_original.as_ref()
+                        a.release_date_original
+                            .as_ref()
                             .and_then(|d| d.split('-').next().map(|s| s.to_string()))
-                            .or_else(|| a.released_at.map(|ts| {
-                                // rough year from unix timestamp
-                                let year = 1970 + (ts / 31_536_000);
-                                year.to_string()
-                            }))
+                            .or_else(|| {
+                                a.released_at.map(|ts| {
+                                    // rough year from unix timestamp
+                                    let year = 1970 + (ts / 31_536_000);
+                                    year.to_string()
+                                })
+                            })
                     })
                     .unwrap_or_else(|| "0000".to_string());
                 let track_num = track.track_number.unwrap_or(0);
@@ -463,16 +468,21 @@ async fn library_scan() -> Result<Json<serde_json::Value>, (axum::http::StatusCo
         )
     })?;
 
-    let count = library::scan_directory(&library, std::path::Path::new("library"))
-        .await
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Scan error: {}", e),
-            )
-        })?;
+    let (added, updated, removed) =
+        library::scan_directory(&library, std::path::Path::new("library"))
+            .await
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Scan error: {}", e),
+                )
+            })?;
 
-    Ok(Json(serde_json::json!({ "scanned": count })))
+    Ok(Json(serde_json::json!({
+        "added": added,
+        "updated": updated,
+        "removed": removed
+    })))
 }
 
 async fn library_stream(
