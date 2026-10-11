@@ -309,7 +309,7 @@ async fn qobuz_download(
         let service = source.service();
         let temp_path_clone = temp_path.clone();
         tokio::task::spawn_blocking(move || {
-            let service = service.blocking_lock();
+            let mut service = service.blocking_lock();
             if let Ok(track) = service.get_track(track_id) {
                 let title = track.title.unwrap_or_else(|| format!("Track {}", track_id));
                 let artist = track
@@ -332,6 +332,29 @@ async fn qobuz_download(
                 tag.set_title(title.clone());
                 tag.set_artist(artist.clone());
                 tag.set_album(album.clone());
+
+                // Embed cover art if available
+                if let Some(album) = &track.album {
+                    if let Some(image_url) = album
+                        .image
+                        .as_ref()
+                        .and_then(|img| img.large.as_ref().or(img.small.as_ref()))
+                    {
+                        if let Ok(resp) = reqwest::blocking::get(image_url) {
+                            if let Ok(bytes) = resp.bytes() {
+                                use lofty::picture::{MimeType, Picture, PictureType};
+                                let picture = Picture::new_unchecked(
+                                    PictureType::CoverFront,
+                                    Some(MimeType::Jpeg),
+                                    None,
+                                    bytes.to_vec(),
+                                );
+                                tag.set_picture(0, picture);
+                            }
+                        }
+                    }
+                }
+
                 tagged.insert_tag(tag);
                 tagged
                     .save_to_path(&temp_path_clone, WriteOptions::default())
