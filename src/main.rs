@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
+mod library;
 mod sources;
 
 use sources::qobuz::QobuzSource;
@@ -32,6 +33,13 @@ struct SearchParams {
 #[derive(Deserialize)]
 struct StreamParams {
     track_id: i32,
+    format_id: Option<i32>,
+}
+
+#[derive(Deserialize)]
+struct DownloadParams {
+    track_id: Option<i32>,
+    album_id: Option<String>,
     format_id: Option<i32>,
 }
 
@@ -76,6 +84,9 @@ fn main() -> anyhow::Result<()> {
                 .route("/qobuz/status", get(qobuz_status))
                 .route("/qobuz/search", get(qobuz_search))
                 .route("/qobuz/stream", get(qobuz_stream))
+                .route("/qobuz/download", get(qobuz_download))
+                .route("/library/search", get(library_search))
+                .route("/library/scan", get(library_scan))
                 .with_state(state);
 
             let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
@@ -103,13 +114,17 @@ async fn qobuz_search(
     Query(params): Query<SearchParams>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let guard = state.qobuz.lock().await;
-    let source = guard
-        .as_ref()
-        .ok_or((axum::http::StatusCode::SERVICE_UNAVAILABLE, "Qobuz not authenticated".into()))?;
+    let source = guard.as_ref().ok_or((
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "Qobuz not authenticated".into(),
+    ))?;
 
     let query = params.q.clone().unwrap_or_default();
     if query.is_empty() {
-        return Err((axum::http::StatusCode::BAD_REQUEST, "Missing query parameter 'q'".into()));
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Missing query parameter 'q'".into(),
+        ));
     }
 
     let limit = params.limit.unwrap_or(10);
@@ -125,8 +140,18 @@ async fn qobuz_search(
         Ok::<_, qobuz_api::errors::QobuzApiError>((albums, tracks))
     })
     .await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Task failed: {}", e)))?
-    .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, format!("Search failed: {}", e)))?;
+    .map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Task failed: {}", e),
+        )
+    })?
+    .map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("Search failed: {}", e),
+        )
+    })?;
 
     let (albums, tracks) = result;
 
@@ -181,4 +206,216 @@ async fn qobuz_stream(
         "duration": file_url.duration,
         "mime_type": file_url.mime_type
     })))
+}
+
+async fn qobuz_download(
+    State(state): State<AppState>,
+    Query(params): Query<DownloadParams>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    use lofty::config::WriteOptions;
+    use lofty::file::{AudioFile, TaggedFileExt};
+    use lofty::tag::{Accessor, Tag, TagType};
+
+    let guard = state.qobuz.lock().await;
+    let source = guard.as_ref().ok_or((
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "Qobuz not authenticated".into(),
+    ))?;
+
+    let format_id = params.format_id.unwrap_or(6);
+    let output_dir = std::path::PathBuf::from("library");
+    std::fs::create_dir_all(&output_dir).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to create library dir: {}", e),
+        )
+    })?;
+
+    let track_id = params.track_id.ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        "track_id required".into(),
+    ))?;
+
+    info!("Downloading track {} via stream URL", track_id);
+
+    let service = source.service();
+    let file_url = tokio::task::spawn_blocking({
+        let service = service.clone();
+        move || {
+            let mut service = service.blocking_lock();
+            service.get_track_file_url(track_id, format_id)
+        }
+    })
+    .await
+    .map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Task failed: {}", e),
+        )
+    })?
+    .map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("Stream URL failed: {}", e),
+        )
+    })?;
+
+    let url = file_url.url.ok_or((
+        axum::http::StatusCode::BAD_GATEWAY,
+        "No stream URL returned".into(),
+    ))?;
+
+    let temp_path = output_dir.join(format!("{}.flac", track_id));
+
+    let client = reqwest::Client::new();
+    let mut resp = client.get(url).send().await.map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("Download request failed: {}", e),
+        )
+    })?;
+
+    if !resp.status().is_success() {
+        return Err((
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("Download failed: HTTP {}", resp.status()),
+        ));
+    }
+
+    let mut file = tokio::fs::File::create(&temp_path).await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to create file: {}", e),
+        )
+    })?;
+
+    while let Some(chunk) = resp.chunk().await.map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("Chunk error: {}", e),
+        )
+    })? {
+        use tokio::io::AsyncWriteExt;
+        file.write_all(&chunk).await.map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Write error: {}", e),
+            )
+        })?;
+    }
+    drop(file);
+
+    let final_path = {
+        let service = source.service();
+        let temp_path_clone = temp_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let service = service.blocking_lock();
+            if let Ok(track) = service.get_track(track_id) {
+                let title = track.title.unwrap_or_else(|| format!("Track {}", track_id));
+                let artist = track
+                    .performer
+                    .as_ref()
+                    .and_then(|p| p.name.clone())
+                    .unwrap_or_else(|| "Unknown Artist".into());
+                let album = track
+                    .album
+                    .as_ref()
+                    .and_then(|a| a.title.clone())
+                    .unwrap_or_else(|| "Unknown Album".into());
+
+                let mut tagged = lofty::read_from_path(&temp_path_clone)
+                    .map_err(|e| format!("lofty read: {}", e))?;
+                let mut tag = tagged
+                    .primary_tag_mut()
+                    .cloned()
+                    .unwrap_or_else(|| Tag::new(TagType::VorbisComments));
+                tag.set_title(title.clone());
+                tag.set_artist(artist.clone());
+                tag.set_album(album.clone());
+                tagged.insert_tag(tag);
+                tagged
+                    .save_to_path(&temp_path_clone, WriteOptions::default())
+                    .map_err(|e| format!("lofty save: {}", e))?;
+
+                let safe_name = format!("{} - {}.flac", sanitize(&artist), sanitize(&title));
+                let new_path = output_dir.join(safe_name);
+                std::fs::rename(&temp_path_clone, &new_path).ok();
+                Ok::<_, String>(new_path)
+            } else {
+                Ok(temp_path_clone)
+            }
+        })
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Tagging task failed: {}", e),
+            )
+        })?
+        .unwrap_or(temp_path)
+    };
+
+    Ok(Json(serde_json::json!({
+        "type": "track",
+        "track_id": track_id,
+        "format_id": format_id,
+        "path": final_path.display().to_string()
+    })))
+}
+
+fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+async fn library_search(
+    Query(params): Query<SearchParams>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let library = library::Library::new("cadence.db").await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("DB error: {}", e),
+        )
+    })?;
+
+    let query = params.q.unwrap_or_default();
+    let results = library.search(&query).await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Search error: {}", e),
+        )
+    })?;
+
+    Ok(Json(
+        serde_json::json!({ "query": query, "tracks": results }),
+    ))
+}
+
+async fn library_scan() -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let library = library::Library::new("cadence.db").await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("DB error: {}", e),
+        )
+    })?;
+
+    let count = library::scan_directory(&library, std::path::Path::new("library"))
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Scan error: {}", e),
+            )
+        })?;
+
+    Ok(Json(serde_json::json!({ "scanned": count })))
 }
