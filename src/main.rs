@@ -94,6 +94,7 @@ fn main() -> anyhow::Result<()> {
                 .route("/library/search", get(library_search))
                 .route("/library/scan", get(library_scan))
                 .route("/library/stream", get(library_stream))
+                .route("/library/ai-search", get(library_ai_search))
                 .with_state(state);
 
             let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
@@ -539,4 +540,106 @@ async fn library_stream(
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(response)
+}
+
+async fn library_ai_search(
+    Query(params): Query<SearchParams>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let query = params.q.unwrap_or_default();
+    if query.is_empty() {
+        return Err((axum::http::StatusCode::BAD_REQUEST, "Missing q".into()));
+    }
+
+    let library = library::Library::new("cadence.db")
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Get a short list of artists in the library
+    let artists: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT artist FROM tracks WHERE artist IS NOT NULL")
+            .fetch_all(&library.pool)
+            .await
+            .unwrap_or_default();
+
+    let prompt = format!(
+        "You are helping search a personal music library.\n\
+     User query: \"{}\"\n\
+     Artists in the library: {}.\n\
+     Which of these artists match the query? \
+     Reply with ONLY a JSON array of matching artist names, nothing else.\n\
+     Example replies:\n\
+     [\"Miles Davis\"]\n\
+     []\n\
+     Do not use markdown.",
+        query,
+        artists.join(", ")
+    );
+
+    let api_key = std::env::var("GEMINI_API_KEY").map_err(|_| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "GEMINI_API_KEY not set".into(),
+        )
+    })?;
+
+    tracing::info!("Artists sent to Gemini: {:?}", artists);
+    tracing::info!("Prompt: {}", prompt);
+
+    let client = reqwest::Client::new();
+    let model_url = std::env::var("GEMINI_MODEL_URL").map_err(|_| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "GEMINI_MODEL_URL not set".into(),
+        )
+    })?;
+
+    let resp = client
+        .post(format!("{}?key={}", model_url, api_key))
+        .json(&serde_json::json!({
+            "contents": [{
+                "parts": [{ "text": prompt }]
+            }]
+        }))
+        .send()
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    tracing::info!("Full Gemini response: {}", json);
+
+    // Extract the text reply
+    let reply = json["candidates"][0]["content"]["parts"][0]["text"]
+        .as_str()
+        .unwrap_or("[]")
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim()
+        .to_string();
+
+    tracing::info!("Gemini cleaned reply: {}", reply);
+
+    let matched_artists: Vec<String> = serde_json::from_str(&reply).unwrap_or_else(|_| {
+        tracing::warn!("Failed to parse Gemini reply as JSON array");
+        vec![]
+    });
+
+    // Now search the library for those artists
+    let mut all_tracks = Vec::new();
+    for artist in matched_artists {
+        if let Ok(tracks) = library.search(&artist).await {
+            all_tracks.extend(tracks);
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "query": query,
+        "ai_reply": reply,
+        "tracks": all_tracks
+    })))
 }
