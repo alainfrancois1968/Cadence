@@ -308,7 +308,8 @@ async fn qobuz_download(
     let format_id = params.format_id.unwrap_or(6);
     let output_dir = std::path::PathBuf::from(
         std::env::var("LIBRARY_PATH").unwrap_or_else(|_| "library".into()),
-    );
+    )
+    .join("Qobuz");
     std::fs::create_dir_all(&output_dir).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -318,6 +319,7 @@ async fn qobuz_download(
 
     let service = source.service();
 
+    // ---------- Album download ----------
     if let Some(album_id) = params.album_id {
         info!("Downloading album {}", album_id);
         let album_id_clone = album_id.clone();
@@ -382,13 +384,17 @@ async fn qobuz_download(
                         .to_string();
                     let track_num = track.track_number.unwrap_or((idx + 1) as i32);
 
+                    let artist_folder =
+                        format!("{} - {}", artist_id.unwrap_or(0), sanitize(&artist));
+                    let album_folder = format!("{} - {}", album_id_clone, sanitize(&album_title));
                     let dir = output_dir_clone
-                        .join(sanitize(&artist))
+                        .join(&artist_folder)
                         .join(&year)
-                        .join(sanitize(&album_title));
+                        .join(&album_folder);
                     let _ = std::fs::create_dir_all(&dir);
 
-                    let filename = format!("{:02}. {}.flac", track_num, sanitize(&title));
+                    let filename =
+                        format!("{:02}. {} - {}.flac", track_num, track_id, sanitize(&title));
                     let final_path = dir.join(filename);
                     let _ = std::fs::rename(&temp_path, &final_path);
 
@@ -420,6 +426,7 @@ async fn qobuz_download(
         })));
     }
 
+    // ---------- Single track download ----------
     let track_id = params.track_id.ok_or((
         axum::http::StatusCode::BAD_REQUEST,
         "track_id or album_id required".into(),
@@ -510,6 +517,11 @@ async fn qobuz_download(
                     .and_then(|a| a.title.clone())
                     .unwrap_or_else(|| "Unknown Album".into());
                 let artist_id = track.performer.as_ref().and_then(|p| p.id);
+                let album_id = track
+                    .album
+                    .as_ref()
+                    .and_then(|a| a.id.clone())
+                    .unwrap_or_default();
 
                 if let Ok(mut tagged) = lofty::read_from_path(&temp_path_clone) {
                     let mut tag = tagged
@@ -531,12 +543,17 @@ async fn qobuz_download(
                     .unwrap_or("0000")
                     .to_string();
                 let track_num = track.track_number.unwrap_or(0);
+
+                let artist_folder = format!("{} - {}", artist_id.unwrap_or(0), sanitize(&artist));
+                let album_folder = format!("{} - {}", album_id, sanitize(&album));
                 let dir = output_dir
-                    .join(sanitize(&artist))
+                    .join(&artist_folder)
                     .join(&year)
-                    .join(sanitize(&album));
+                    .join(&album_folder);
                 let _ = std::fs::create_dir_all(&dir);
-                let filename = format!("{:02}. {}.flac", track_num, sanitize(&title));
+
+                let filename =
+                    format!("{:02}. {} - {}.flac", track_num, track_id, sanitize(&title));
                 let new_path = dir.join(filename);
                 let _ = std::fs::rename(&temp_path_clone, &new_path);
 
