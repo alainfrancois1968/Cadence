@@ -53,7 +53,7 @@ curl "http://localhost:3000/qobuz/download?track_id=13176086&format_id=6"
 
 curl http://localhost:3000/library/scan
 
-sqlite3 ~/Projects/Cadence/cadence.db "SELECT id, title, artist, album, path FROM tracks;"
+sqlite3 ~/Projects/Cadence/cadence.db "SELECT id, title, artist, artist_id, album, path FROM tracks;"
 
 curl "http://localhost:3000/library/search?q=blues"
 
