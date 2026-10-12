@@ -45,7 +45,6 @@ struct DownloadParams {
 
 #[derive(Deserialize)]
 struct LibraryStreamParams {
-    id: Option<i64>,
     path: Option<String>,
 }
 
@@ -65,7 +64,6 @@ fn main() -> anyhow::Result<()> {
         std::env::var("QOBUZ_APP_SECRET").is_ok()
     );
 
-    // Initialize Qobuz before starting the Tokio runtime
     let qobuz = match QobuzSource::new() {
         Ok(src) => {
             info!("Qobuz authenticated successfully");
@@ -91,12 +89,12 @@ fn main() -> anyhow::Result<()> {
                 .route("/qobuz/search", get(qobuz_search))
                 .route("/qobuz/stream", get(qobuz_stream))
                 .route("/qobuz/download", get(qobuz_download))
+                .route("/qobuz/album-id", get(qobuz_album_id))
+                .route("/qobuz/queue-artist", get(qobuz_queue_artist))
                 .route("/library/search", get(library_search))
                 .route("/library/scan", get(library_scan))
                 .route("/library/stream", get(library_stream))
                 .route("/library/ai-search", get(library_ai_search))
-                .route("/qobuz/album-id", get(qobuz_album_id))
-                .route("/qobuz/queue-artist", get(qobuz_queue_artist))
                 .with_state(state);
 
             let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
@@ -218,6 +216,31 @@ async fn qobuz_stream(
     })))
 }
 
+async fn index_downloaded_track(
+    path: &str,
+    title: &str,
+    artist: &str,
+    artist_id: Option<i32>,
+    album: &str,
+    track_number: Option<i32>,
+    duration: Option<f64>,
+) {
+    if let Ok(library) = library::Library::new("cadence.db").await {
+        let _ = library
+            .upsert_track(
+                path,
+                Some(title),
+                Some(artist),
+                artist_id,
+                Some(album),
+                track_number,
+                duration,
+                "flac",
+            )
+            .await;
+    }
+}
+
 async fn qobuz_download(
     State(state): State<AppState>,
     Query(params): Query<DownloadParams>,
@@ -284,6 +307,11 @@ async fn qobuz_download(
                         .title
                         .clone()
                         .unwrap_or_else(|| "Unknown Album".into());
+                    let artist_id = album
+                        .artist
+                        .as_ref()
+                        .and_then(|a| a.id)
+                        .or_else(|| track.performer.as_ref().and_then(|p| p.id));
 
                     if let Ok(mut tagged) = lofty::read_from_path(&temp_path) {
                         let mut tag = tagged
@@ -314,6 +342,19 @@ async fn qobuz_download(
                     let filename = format!("{:02}. {}.flac", track_num, sanitize(&title));
                     let final_path = dir.join(filename);
                     let _ = std::fs::rename(&temp_path, &final_path);
+
+                    // Index into SQLite
+                    let rt = tokio::runtime::Handle::current();
+                    rt.block_on(index_downloaded_track(
+                        final_path.to_str().unwrap_or(""),
+                        &title,
+                        &artist,
+                        artist_id,
+                        &album_title,
+                        Some(track_num),
+                        None,
+                    ));
+
                     saved.push(final_path.display().to_string());
                 }
             }
@@ -421,6 +462,7 @@ async fn qobuz_download(
                     .as_ref()
                     .and_then(|a| a.title.clone())
                     .unwrap_or_else(|| "Unknown Album".into());
+                let artist_id = track.performer.as_ref().and_then(|p| p.id);
 
                 if let Ok(mut tagged) = lofty::read_from_path(&temp_path_clone) {
                     let mut tag = tagged
@@ -450,6 +492,18 @@ async fn qobuz_download(
                 let filename = format!("{:02}. {}.flac", track_num, sanitize(&title));
                 let new_path = dir.join(filename);
                 let _ = std::fs::rename(&temp_path_clone, &new_path);
+
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(index_downloaded_track(
+                    new_path.to_str().unwrap_or(""),
+                    &title,
+                    &artist,
+                    artist_id,
+                    &album,
+                    track.track_number,
+                    None,
+                ));
+
                 Ok::<_, String>(new_path)
             } else {
                 Ok(temp_path_clone)
@@ -470,226 +524,6 @@ async fn qobuz_download(
         "track_id": track_id,
         "format_id": format_id,
         "path": final_path.display().to_string()
-    })))
-}
-
-fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>()
-        .trim()
-        .to_string()
-}
-
-async fn library_search(
-    Query(params): Query<SearchParams>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let library = library::Library::new("cadence.db").await.map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("DB error: {}", e),
-        )
-    })?;
-
-    let query = params.q.unwrap_or_default();
-    let results = library.search(&query).await.map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Search error: {}", e),
-        )
-    })?;
-
-    Ok(Json(
-        serde_json::json!({ "query": query, "tracks": results }),
-    ))
-}
-
-async fn library_scan() -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let library = library::Library::new("cadence.db").await.map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("DB error: {}", e),
-        )
-    })?;
-
-    let (added, updated, removed) =
-        library::scan_directory(&library, std::path::Path::new("library"))
-            .await
-            .map_err(|e| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Scan error: {}", e),
-                )
-            })?;
-
-    Ok(Json(serde_json::json!({
-        "added": added,
-        "updated": updated,
-        "removed": removed
-    })))
-}
-
-async fn library_stream(
-    Query(params): Query<LibraryStreamParams>,
-) -> Result<impl axum::response::IntoResponse, (axum::http::StatusCode, String)> {
-    let library = library::Library::new("cadence.db").await.map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("DB error: {}", e),
-        )
-    })?;
-
-    // Resolve path from id or direct path
-    let file_path = if let Some(id) = params.id {
-        // You may want a get_by_id method; for now use search or add one
-        let rows = library
-            .search("")
-            .await
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        rows.into_iter()
-            .find(|t| t["id"] == id)
-            .and_then(|t| t["path"].as_str().map(|s| s.to_string()))
-            .ok_or((axum::http::StatusCode::NOT_FOUND, "Track not found".into()))?
-    } else if let Some(path) = params.path {
-        path
-    } else {
-        return Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            "Provide id or path".into(),
-        ));
-    };
-
-    // Load the whole file into memory
-    let bytes = tokio::fs::read(&file_path).await.map_err(|e| {
-        (
-            axum::http::StatusCode::NOT_FOUND,
-            format!("Failed to read file: {}", e),
-        )
-    })?;
-
-    let mime = if file_path.ends_with(".flac") {
-        "audio/flac"
-    } else if file_path.ends_with(".wav") {
-        "audio/wav"
-    } else {
-        "application/octet-stream"
-    };
-
-    let body = axum::body::Body::from(bytes);
-    let response = axum::response::Response::builder()
-        .header("Content-Type", mime)
-        .header("Accept-Ranges", "bytes")
-        .body(body)
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    Ok(response)
-}
-
-async fn library_ai_search(
-    Query(params): Query<SearchParams>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let query = params.q.unwrap_or_default();
-    if query.is_empty() {
-        return Err((axum::http::StatusCode::BAD_REQUEST, "Missing q".into()));
-    }
-
-    let library = library::Library::new("cadence.db")
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // Get a short list of artists in the library
-    let artists: Vec<String> =
-        sqlx::query_scalar("SELECT DISTINCT artist FROM tracks WHERE artist IS NOT NULL")
-            .fetch_all(&library.pool)
-            .await
-            .unwrap_or_default();
-
-    let prompt = format!(
-        "You are helping search a personal music library.\n\
-     User query: \"{}\"\n\
-     Artists in the library: {}.\n\
-     Which of these artists match the query? \
-     Reply with ONLY a JSON array of matching artist names, nothing else.\n\
-     Example replies:\n\
-     [\"Miles Davis\"]\n\
-     []\n\
-     Do not use markdown.",
-        query,
-        artists.join(", ")
-    );
-
-    let api_key = std::env::var("GEMINI_API_KEY").map_err(|_| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "GEMINI_API_KEY not set".into(),
-        )
-    })?;
-
-    tracing::info!("Artists sent to Gemini: {:?}", artists);
-    tracing::info!("Prompt: {}", prompt);
-
-    let client = reqwest::Client::new();
-    let model_url = std::env::var("GEMINI_MODEL_URL").map_err(|_| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "GEMINI_MODEL_URL not set".into(),
-        )
-    })?;
-
-    let resp = client
-        .post(format!("{}?key={}", model_url, api_key))
-        .json(&serde_json::json!({
-            "contents": [{
-                "parts": [{ "text": prompt }]
-            }]
-        }))
-        .send()
-        .await
-        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e.to_string()))?;
-
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e.to_string()))?;
-
-    tracing::info!("Full Gemini response: {}", json);
-
-    // Extract the text reply
-    let reply = json["candidates"][0]["content"]["parts"][0]["text"]
-        .as_str()
-        .unwrap_or("[]")
-        .trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim()
-        .to_string();
-
-    tracing::info!("Gemini cleaned reply: {}", reply);
-
-    let matched_artists: Vec<String> = serde_json::from_str(&reply).unwrap_or_else(|_| {
-        tracing::warn!("Failed to parse Gemini reply as JSON array");
-        vec![]
-    });
-
-    // Now search the library for those artists
-    let mut all_tracks = Vec::new();
-    for artist in matched_artists {
-        if let Ok(tracks) = library.search(&artist).await {
-            all_tracks.extend(tracks);
-        }
-    }
-
-    Ok(Json(serde_json::json!({
-        "query": query,
-        "ai_reply": reply,
-        "tracks": all_tracks
     })))
 }
 
@@ -794,4 +628,174 @@ async fn qobuz_queue_artist(
         "artist_query": query,
         "queued": queued
     })))
+}
+
+async fn library_search(
+    Query(params): Query<SearchParams>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let library = library::Library::new("cadence.db").await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("DB error: {}", e),
+        )
+    })?;
+
+    let query = params.q.unwrap_or_default();
+    let results = library.search(&query).await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Search error: {}", e),
+        )
+    })?;
+
+    Ok(Json(
+        serde_json::json!({ "query": query, "tracks": results }),
+    ))
+}
+
+async fn library_scan() -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let library = library::Library::new("cadence.db").await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("DB error: {}", e),
+        )
+    })?;
+
+    let (added, updated, removed) =
+        library::scan_directory(&library, std::path::Path::new("library"))
+            .await
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Scan error: {}", e),
+                )
+            })?;
+
+    Ok(Json(serde_json::json!({
+        "added": added,
+        "updated": updated,
+        "removed": removed
+    })))
+}
+
+async fn library_stream(
+    Query(params): Query<LibraryStreamParams>,
+) -> Result<impl axum::response::IntoResponse, (axum::http::StatusCode, String)> {
+    let path = params
+        .path
+        .ok_or((axum::http::StatusCode::BAD_REQUEST, "Missing path".into()))?;
+
+    let bytes = tokio::fs::read(&path).await.map_err(|e| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            format!("Failed to read file: {}", e),
+        )
+    })?;
+
+    let mime = if path.ends_with(".flac") {
+        "audio/flac"
+    } else {
+        "audio/wav"
+    };
+
+    Ok(([(axum::http::header::CONTENT_TYPE, mime)], bytes))
+}
+
+async fn library_ai_search(
+    Query(params): Query<SearchParams>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let query = params.q.unwrap_or_default();
+    if query.is_empty() {
+        return Err((axum::http::StatusCode::BAD_REQUEST, "Missing q".into()));
+    }
+
+    let library = library::Library::new("cadence.db")
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let artists: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT artist FROM tracks WHERE artist IS NOT NULL")
+            .fetch_all(&library.pool)
+            .await
+            .unwrap_or_default();
+
+    let prompt = format!(
+        "You are helping search a personal music library.\n\
+         User query: \"{}\"\n\
+         Artists in the library: {}.\n\
+         Which of these artists match the query? \
+         Reply with ONLY a JSON array of matching artist names, nothing else.\n\
+         Example: [\"Miles Davis\"] or []\n\
+         Do not use markdown.",
+        query,
+        artists.join(", ")
+    );
+
+    let api_key = std::env::var("GEMINI_API_KEY").map_err(|_| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "GEMINI_API_KEY not set".into(),
+        )
+    })?;
+
+    let model_url = std::env::var("GEMINI_MODEL_URL")
+        .unwrap_or_else(|_| "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent".to_string());
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}?key={}", model_url, api_key))
+        .json(&serde_json::json!({
+            "contents": [{
+                "parts": [{ "text": prompt }]
+            }]
+        }))
+        .send()
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    let reply = json["candidates"][0]["content"]["parts"][0]["text"]
+        .as_str()
+        .unwrap_or("[]")
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim()
+        .to_string();
+
+    tracing::info!("Gemini cleaned reply: {}", reply);
+
+    let matched_artists: Vec<String> = serde_json::from_str(&reply).unwrap_or_default();
+
+    let mut all_tracks = Vec::new();
+    for artist in matched_artists {
+        if let Ok(tracks) = library.search(&artist).await {
+            all_tracks.extend(tracks);
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "query": query,
+        "ai_reply": reply,
+        "tracks": all_tracks
+    })))
+}
+
+fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
