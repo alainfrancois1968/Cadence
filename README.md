@@ -88,3 +88,10 @@ curl "http://localhost:3000/qobuz/album-id?q=equinox"
 id:oewcjd3wc0ksa
 
 curl "http://localhost:3000/qobuz/download?album_id=oewcjd3wc0ksa&format_id=6"
+
+
+download album_ids for artist
+curl "http://localhost:3000/qobuz/queue-artist?q=Miles%20Davis"
+
+sqlite3 ~/Projects/Cadence/cadence.db "SELECT album_id, artist, artist_id, title FROM album_queue LIMIT 5;"
+
