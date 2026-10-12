@@ -90,7 +90,7 @@ fn main() -> anyhow::Result<()> {
                 .route("/qobuz/stream", get(qobuz_stream))
                 .route("/qobuz/download", get(qobuz_download))
                 .route("/qobuz/album-id", get(qobuz_album_id))
-                .route("/qobuz/queue-artist", get(qobuz_queue_artist))
+                .route("/qobuz/queue-albums", get(qobuz_queue_albums))
                 .route("/library/search", get(library_search))
                 .route("/library/scan", get(library_scan))
                 .route("/library/stream", get(library_stream))
@@ -567,7 +567,7 @@ async fn qobuz_album_id(
     })))
 }
 
-async fn qobuz_queue_artist(
+async fn qobuz_queue_albums(
     State(state): State<AppState>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -575,6 +575,8 @@ async fn qobuz_queue_artist(
     if query.is_empty() {
         return Err((axum::http::StatusCode::BAD_REQUEST, "Missing q".into()));
     }
+
+    let limit = params.limit.unwrap_or(50);
 
     let guard = state.qobuz.lock().await;
     let source = guard.as_ref().ok_or((
@@ -592,7 +594,7 @@ async fn qobuz_queue_artist(
     let albums = tokio::task::spawn_blocking(move || {
         let mut service = service.blocking_lock();
         let result = service
-            .search_albums(&query_clone, Some(50), None)
+            .search_albums(&query_clone, Some(limit), None)
             .map_err(|e| e.to_string())?;
         Ok::<_, String>(result.items.unwrap_or_default())
     })
@@ -627,6 +629,7 @@ async fn qobuz_queue_artist(
 
     Ok(Json(serde_json::json!({
         "artist_query": query,
+        "limit": limit,
         "queued": queued
     })))
 }
