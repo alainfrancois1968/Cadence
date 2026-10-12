@@ -63,7 +63,7 @@ sqlite3 ~/Projects/Cadence/cadence.db "SELECT id, title, artist, artist_id, albu
 curl "http://localhost:3000/library/search?q=blues"
 
 
-http://localhost:3000/library/stream?path=library/Miles%20Davis/1959/Kind%20Of%20Blue/04.%20All%20Blues.flac
+http://localhost:3000/library/stream_local?path=library/Miles%20Davis/1959/Kind%20Of%20Blue/04.%20All%20Blues.flac
 
 AQ.Ab8RN6J1dyIfPYHBP1tGd8rCmgeZcQ_FsHpEG48LN6YHB-nLTg
 
@@ -114,3 +114,11 @@ curl "http://localhost:3000/qobuz/download-artist-albums?artist_id=4900089&limit
 
 
 
+
+
+
+
+
+
+
+curl -I "http://localhost:3000/library/stream_local?path=library/Qobuz/6760%20-%20Miles%20Davis/1959/5099749522428%20-%20Kind%20Of%20Blue/04.%2013176086%20-%20All%20Blues.flac"

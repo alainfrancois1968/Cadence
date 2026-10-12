@@ -120,7 +120,7 @@ fn main() -> anyhow::Result<()> {
                 )
                 .route("/library/search", get(library_search))
                 .route("/library/scan", get(library_scan))
-                .route("/library/stream", get(library_stream))
+                .route("/library/stream_local", get(library_stream_local))
                 .route("/library/ai-search", get(library_ai_search))
                 .with_state(state);
 
@@ -920,7 +920,7 @@ async fn library_scan() -> Result<Json<serde_json::Value>, (axum::http::StatusCo
     })))
 }
 
-async fn library_stream(
+async fn library_stream_local(
     Query(params): Query<LibraryStreamParams>,
 ) -> Result<impl axum::response::IntoResponse, (axum::http::StatusCode, String)> {
     let path = params
@@ -936,8 +936,10 @@ async fn library_stream(
 
     let mime = if path.ends_with(".flac") {
         "audio/flac"
-    } else {
+    } else if path.ends_with(".wav") {
         "audio/wav"
+    } else {
+        "application/octet-stream"
     };
 
     Ok(([(axum::http::header::CONTENT_TYPE, mime)], bytes))
