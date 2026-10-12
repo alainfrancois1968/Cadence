@@ -98,4 +98,6 @@ sqlite3 ~/Projects/Cadence/cadence.db "SELECT album_id, artist, artist_id, title
 
 sqlite3 ~/Projects/Cadence/cadence.db "SELECT title, artist, artist_id FROM tracks WHERE artist_id IS NOT NULL LIMIT 5;"
 
+curl "http://localhost:3000/qobuz/queue-artists?q=Miles%20Davis&limit=200"
 
+sqlite3 ~/Projects/Cadence/cadence.db "SELECT * FROM artists"

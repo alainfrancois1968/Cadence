@@ -95,6 +95,7 @@ fn main() -> anyhow::Result<()> {
                 .route("/library/scan", get(library_scan))
                 .route("/library/stream", get(library_stream))
                 .route("/library/ai-search", get(library_ai_search))
+                .route("/qobuz/queue-artists", get(qobuz_queue_artists))
                 .with_state(state);
 
             let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
@@ -798,4 +799,58 @@ fn sanitize(s: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+async fn qobuz_queue_artists(
+    State(state): State<AppState>,
+    Query(params): Query<SearchParams>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let query = params.q.unwrap_or_default();
+    if query.is_empty() {
+        return Err((axum::http::StatusCode::BAD_REQUEST, "Missing q".into()));
+    }
+
+    let limit = params.limit.unwrap_or(50);
+
+    let guard = state.qobuz.lock().await;
+    let source = guard.as_ref().ok_or((
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "Qobuz not authenticated".into(),
+    ))?;
+
+    let library = library::Library::new("cadence.db")
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let service = source.service();
+    let query_clone = query.clone();
+
+    let artists = tokio::task::spawn_blocking(move || {
+        let mut service = service.blocking_lock();
+        let result = service
+            .search_artists(&query_clone, Some(limit), None)
+            .map_err(|e| e.to_string())?;
+        Ok::<_, String>(result.items.unwrap_or_default())
+    })
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+
+    let mut queued = 0;
+    for artist in artists {
+        if let (Some(id), Some(name)) = (artist.id, artist.name) {
+            let _ = sqlx::query("INSERT OR IGNORE INTO artists (artist_id, name) VALUES (?, ?)")
+                .bind(id)
+                .bind(&name)
+                .execute(&library.pool)
+                .await;
+            queued += 1;
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "query": query,
+        "limit": limit,
+        "queued": queued
+    })))
 }
