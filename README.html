@@ -186,13 +186,23 @@
             </tr>
             <tr>
                 <td><code>GET /library/stream_local</code></td>
-                <td>Stream a local file</td>
+                <td>Stream a local file by path</td>
                 <td>Reads the requested file</td>
                 <td>—</td>
                 <td>—</td>
                 <td>—</td>
-                <td>Loads the whole file into memory; URL is also stored in tracks.stream_url</td>
+                <td>Loads the whole file into memory</td>
                 <td><code>curl "http://localhost:3000/library/stream_local?path=library/Qobuz/…"</code></td>
+            </tr>
+            <tr>
+                <td><code>GET /library/stream_qobuz</code></td>
+                <td>Stream a Qobuz track (download if missing)</td>
+                <td>Reads local file if present</td>
+                <td>Downloads FLAC if not cached</td>
+                <td>Looks up path in tracks</td>
+                <td>Upserts tracks on first download</td>
+                <td>Always streams from local storage</td>
+                <td><code>curl "http://localhost:3000/library/stream_qobuz?track_id=13176086&format_id=6"</code></td>
             </tr>
             <tr>
                 <td><code>GET /library/ai-search</code></td>
