@@ -25,3 +25,5 @@ lofty = "0.21"
 walkdir = "2"
 
 urlencoding = "2"
+tower-http = { version = "0.7.1", features = ["cors"] }
+tokio-util = { version = "0.7.20", features = ["io"] }

@@ -1,57 +1,176 @@
 use axum::{
+    body::Body,
     extract::{Query, State},
+    http::{header, HeaderMap, StatusCode},
+    response::Response,
     routing::get,
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::sync::Mutex;
-use tracing::info;
+use tower_http::cors::CorsLayer;
+use tracing::{info, warn};
 
 mod library;
 mod sources;
 
+use library::Library;
 use sources::qobuz::QobuzSource;
 
 #[derive(Clone)]
 struct AppState {
     qobuz: Arc<Mutex<Option<QobuzSource>>>,
+    library: Arc<Library>,
 }
 
-#[derive(Serialize)]
-struct StatusResponse {
-    status: String,
-    authenticated: bool,
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    dotenvy::dotenv().ok();
+
+    let db_path = std::env::var("DATABASE_URL").unwrap_or_else(|_| "cadence.db".into());
+    let library = Arc::new(Library::new(&db_path).await?);
+    let qobuz = Arc::new(Mutex::new(None));
+
+    {
+        let mut q = qobuz.lock().await;
+        match QobuzSource::new() {
+            Ok(src) => {
+                info!("Qobuz authenticated successfully");
+                *q = Some(src);
+            }
+            Err(e) => warn!("Qobuz authentication failed (continuing without it): {}", e),
+        }
+    }
+
+    let state = AppState {
+        qobuz: qobuz.clone(),
+        library: library.clone(),
+    };
+
+    let app = Router::new()
+        .route("/health", get(health))
+        .route("/qobuz/status", get(qobuz_status))
+        .route("/qobuz/search", get(qobuz_search))
+        .route("/qobuz/stream", get(qobuz_stream))
+        .route("/qobuz/download", get(qobuz_download))
+        .route("/qobuz/album-id", get(qobuz_album_id))
+        .route("/qobuz/queue-albums", get(qobuz_queue_albums))
+        .route("/qobuz/queue-artists", get(qobuz_queue_artists))
+        .route(
+            "/qobuz/queue-albums-from-artists",
+            get(qobuz_queue_albums_from_artists),
+        )
+        .route(
+            "/qobuz/download-artist-albums",
+            get(qobuz_download_artist_albums),
+        )
+        .route("/library/search", get(library_search))
+        .route("/library/scan", get(library_scan))
+        .route("/library/stream_local", get(stream_local))
+        .route("/library/stream_qobuz", get(stream_qobuz))
+        .route("/library/ai-search", get(library_ai_search))
+        .layer(CorsLayer::permissive())
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    info!("Cadence Music Server listening on http://0.0.0.0:3000");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn health() -> &'static str {
+    "ok"
+}
+
+async fn qobuz_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let q = state.qobuz.lock().await;
+    Json(serde_json::json!({
+        "status": "ok",
+        "authenticated": q.is_some()
+    }))
 }
 
 #[derive(Deserialize)]
 struct SearchParams {
     q: Option<String>,
-    limit: Option<i32>,
+    limit: Option<u32>,
 }
 
-#[derive(Deserialize)]
-struct LimitParams {
-    limit: Option<i32>,
-}
+async fn qobuz_search(
+    State(state): State<AppState>,
+    Query(params): Query<SearchParams>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let q = state.qobuz.lock().await;
+    let source = q.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Qobuz not available".into(),
+    ))?;
+    let query = params.q.clone().unwrap_or_default();
+    let limit = params.limit.unwrap_or(20) as i32;
 
-#[derive(Deserialize)]
-struct ArtistDownloadParams {
-    artist_id: i32,
-    limit: Option<i32>,
-    format_id: Option<i32>,
-}
+    let service = source.service();
+    let result = tokio::task::spawn_blocking(move || {
+        let mut service = service.blocking_lock();
+        let albums = service
+            .search_albums(&query, Some(limit), None)
+            .map_err(|e| e.to_string())?;
+        let tracks = service
+            .search_tracks(&query, Some(limit), None)
+            .map_err(|e| e.to_string())?;
+        Ok::<_, String>((albums, tracks))
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-#[derive(Deserialize)]
-struct ArtistQueueParams {
-    artist_id: i32,
-    limit: Option<i32>,
+    Ok(Json(serde_json::json!({
+        "query": params.q,
+        "albums": result.0,
+        "tracks": result.1
+    })))
 }
 
 #[derive(Deserialize)]
 struct StreamParams {
     track_id: i32,
     format_id: Option<i32>,
+}
+
+async fn qobuz_stream(
+    State(state): State<AppState>,
+    Query(params): Query<StreamParams>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let q = state.qobuz.lock().await;
+    let source = q.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Qobuz not available".into(),
+    ))?;
+    let format_id = params.format_id.unwrap_or(6);
+
+    let service = source.service();
+    let file_url = tokio::task::spawn_blocking(move || {
+        let mut service = service.blocking_lock();
+        service
+            .get_track_file_url(params.track_id, format_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({
+        "track_id": params.track_id,
+        "format_id": format_id,
+        "duration": file_url.duration,
+        "mime_type": file_url.mime_type,
+        "url": file_url.url
+    })))
 }
 
 #[derive(Deserialize)]
@@ -61,225 +180,54 @@ struct DownloadParams {
     format_id: Option<i32>,
 }
 
-#[derive(Deserialize)]
-struct LibraryStreamParams {
-    path: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct QobuzStreamParams {
-    track_id: i32,
-    format_id: Option<i32>,
-}
-
-fn main() -> anyhow::Result<()> {
-    dotenvy::dotenv().ok();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
-
-    println!("EMAIL set: {}", std::env::var("QOBUZ_EMAIL").is_ok());
-    println!("PASSWORD set: {}", std::env::var("QOBUZ_PASSWORD").is_ok());
-    println!("APP_ID set: {}", std::env::var("QOBUZ_APP_ID").is_ok());
-    println!(
-        "APP_SECRET set: {}",
-        std::env::var("QOBUZ_APP_SECRET").is_ok()
-    );
-
-    let qobuz = match QobuzSource::new() {
-        Ok(src) => {
-            info!("Qobuz authenticated successfully");
-            Some(src)
-        }
-        Err(e) => {
-            tracing::warn!("Qobuz authentication failed (continuing without it): {}", e);
-            None
-        }
-    };
-
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(async move {
-            let state = AppState {
-                qobuz: Arc::new(Mutex::new(qobuz)),
-            };
-
-            let app = Router::new()
-                .route("/health", get(health))
-                .route("/qobuz/status", get(qobuz_status))
-                .route("/qobuz/search", get(qobuz_search))
-                .route("/qobuz/stream", get(qobuz_stream))
-                .route("/qobuz/download", get(qobuz_download))
-                .route("/qobuz/album-id", get(qobuz_album_id))
-                .route("/qobuz/queue-albums", get(qobuz_queue_albums))
-                .route("/qobuz/queue-artists", get(qobuz_queue_artists))
-                .route(
-                    "/qobuz/queue-albums-from-artists",
-                    get(qobuz_queue_albums_from_artists),
-                )
-                .route(
-                    "/qobuz/download-artist-albums",
-                    get(qobuz_download_artist_albums),
-                )
-                .route("/library/search", get(library_search))
-                .route("/library/scan", get(library_scan))
-                .route("/library/stream_local", get(library_stream_local))
-                .route("/library/stream_qobuz", get(library_stream_qobuz))
-                .route("/library/ai-search", get(library_ai_search))
-                .with_state(state);
-
-            let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-            info!("Cadence Music Server listening on http://0.0.0.0:3000");
-            axum::serve(listener, app).await?;
-
-            Ok(())
-        })
-}
-
-async fn health() -> &'static str {
-    "ok"
-}
-
-async fn qobuz_status(State(state): State<AppState>) -> Json<StatusResponse> {
-    let guard = state.qobuz.lock().await;
-    Json(StatusResponse {
-        status: "ok".to_string(),
-        authenticated: guard.is_some(),
-    })
-}
-
-async fn qobuz_search(
+async fn qobuz_download(
     State(state): State<AppState>,
-    Query(params): Query<SearchParams>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let guard = state.qobuz.lock().await;
-    let source = guard.as_ref().ok_or((
-        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        "Qobuz not authenticated".into(),
+    Query(params): Query<DownloadParams>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let q = state.qobuz.lock().await;
+    let source = q.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Qobuz not available".into(),
     ))?;
-
-    let query = params.q.clone().unwrap_or_default();
-    if query.is_empty() {
-        return Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            "Missing query parameter 'q'".into(),
-        ));
-    }
-
-    let limit = params.limit.unwrap_or(10);
-    info!("Searching Qobuz for: {}", query);
-
-    let service = source.service();
-    let query_for_search = query.clone();
-
-    let result = tokio::task::spawn_blocking(move || {
-        let service = service.blocking_lock();
-        let albums = service.search_albums(&query_for_search, Some(limit), None)?;
-        let tracks = service.search_tracks(&query_for_search, Some(limit), None)?;
-        Ok::<_, qobuz_api::errors::QobuzApiError>((albums, tracks))
-    })
-    .await
-    .map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task failed: {}", e),
-        )
-    })?
-    .map_err(|e| {
-        (
-            axum::http::StatusCode::BAD_GATEWAY,
-            format!("Search failed: {}", e),
-        )
-    })?;
-
-    let (albums, tracks) = result;
-
-    Ok(Json(serde_json::json!({
-        "query": query,
-        "albums": albums,
-        "tracks": tracks
-    })))
-}
-
-async fn qobuz_stream(
-    State(state): State<AppState>,
-    Query(params): Query<StreamParams>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let guard = state.qobuz.lock().await;
-    let source = guard.as_ref().ok_or((
-        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        "Qobuz not authenticated".into(),
-    ))?;
-
     let format_id = params.format_id.unwrap_or(6);
-    let track_id = params.track_id;
-    info!(
-        "Requesting stream URL for track {} (format {})",
-        track_id, format_id
-    );
 
-    let service = source.service();
-
-    let file_url = tokio::task::spawn_blocking(move || {
-        let mut service = service.blocking_lock();
-        service.get_track_file_url(track_id, format_id)
-    })
-    .await
-    .map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task failed: {}", e),
-        )
-    })?
-    .map_err(|e| {
-        (
-            axum::http::StatusCode::BAD_GATEWAY,
-            format!("Stream URL failed: {}", e),
-        )
-    })?;
-
-    Ok(Json(serde_json::json!({
-        "track_id": track_id,
-        "format_id": format_id,
-        "url": file_url.url,
-        "duration": file_url.duration,
-        "mime_type": file_url.mime_type
-    })))
-}
-
-async fn index_downloaded_track(
-    path: &str,
-    title: &str,
-    artist: &str,
-    artist_id: Option<i32>,
-    album: &str,
-    track_number: Option<i32>,
-    duration: Option<f64>,
-    genre: Option<&str>,
-) {
-    if let Ok(library) = library::Library::new("cadence.db").await {
-        let stream_url = format!(
-            "http://localhost:3000/library/stream_local?path={}",
-            urlencoding::encode(path)
-        );
-        let _ = library
-            .upsert_track(
-                path,
-                Some(title),
-                Some(artist),
-                artist_id,
-                Some(album),
-                track_number,
-                duration,
-                "flac",
-                Some(&stream_url),
-                genre,
-            )
-            .await;
+    if let Some(track_id) = params.track_id {
+        let path = download_track_to_library(source, track_id, format_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        return Ok(Json(serde_json::json!({
+            "type": "track",
+            "track_id": track_id,
+            "path": path
+        })));
     }
+
+    if let Some(album_id) = params.album_id {
+        // Album download: get album then download each track by id
+        // (adjust field access once you inspect the actual Album type)
+        let service = source.service();
+        let album_id_clone = album_id.clone();
+        let _album = tokio::task::spawn_blocking(move || {
+            let mut service = service.blocking_lock();
+            service
+                .get_album(&album_id_clone, Some("tracks"))
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+        return Ok(Json(serde_json::json!({
+            "type": "album",
+            "album_id": album_id,
+            "note": "Track list download not fully wired – inspect Album fields"
+        })));
+    }
+
+    Err((
+        StatusCode::BAD_REQUEST,
+        "track_id or album_id required".into(),
+    ))
 }
 
 async fn download_track_to_library(
@@ -302,12 +250,14 @@ async fn download_track_to_library(
         let service = service.clone();
         move || {
             let mut service = service.blocking_lock();
-            service.get_track_file_url(track_id, format_id)
+            service
+                .get_track_file_url(track_id, format_id)
+                .map_err(|e| e.to_string())
         }
     })
     .await
     .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e)?;
 
     let url = file_url.url.ok_or("No stream URL")?;
     let temp_path = output_dir.join(format!("{}.flac", track_id));
@@ -351,7 +301,6 @@ async fn download_track_to_library(
                 .as_ref()
                 .and_then(|a| a.id.clone())
                 .unwrap_or_default();
-            // qobuz-api Track has no genre field
             let genre = track
                 .album
                 .as_ref()
@@ -394,18 +343,6 @@ async fn download_track_to_library(
             let new_path = dir.join(filename);
             let _ = std::fs::rename(&temp_path, &new_path);
 
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(index_downloaded_track(
-                new_path.to_str().unwrap_or(""),
-                &title,
-                &artist,
-                artist_id,
-                &album,
-                track.track_number,
-                None,
-                genre.as_deref(),
-            ));
-
             Ok::<_, String>(new_path.display().to_string())
         }
     })
@@ -413,664 +350,6 @@ async fn download_track_to_library(
     .map_err(|e| e.to_string())??;
 
     Ok(final_path)
-}
-
-async fn qobuz_download(
-    State(state): State<AppState>,
-    Query(params): Query<DownloadParams>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    use lofty::config::WriteOptions;
-    use lofty::file::{AudioFile, TaggedFileExt};
-    use lofty::tag::{Accessor, Tag, TagType};
-
-    let guard = state.qobuz.lock().await;
-    let source = guard.as_ref().ok_or((
-        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        "Qobuz not authenticated".into(),
-    ))?;
-
-    let format_id = params.format_id.unwrap_or(6);
-    let output_dir = std::path::PathBuf::from(
-        std::env::var("LIBRARY_PATH").unwrap_or_else(|_| "library".into()),
-    )
-    .join("Qobuz");
-    std::fs::create_dir_all(&output_dir).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to create library dir: {}", e),
-        )
-    })?;
-
-    let service = source.service();
-
-    if let Some(album_id) = params.album_id {
-        info!("Downloading album {}", album_id);
-        let album_id_clone = album_id.clone();
-        let output_dir_clone = output_dir.clone();
-        let paths = tokio::task::spawn_blocking(move || {
-            let mut service = service.blocking_lock();
-            let album = service
-                .get_album(&album_id_clone, Some("track_ids"))
-                .map_err(|e| format!("get_album failed: {}", e))?;
-            let mut saved = Vec::new();
-
-            if let Some(track_ids) = album.track_ids {
-                let artist = album
-                    .artist
-                    .as_ref()
-                    .and_then(|a| a.name.clone())
-                    .unwrap_or_else(|| "Unknown Artist".into());
-                let album_title = album
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| "Unknown Album".into());
-                let artist_id = album.artist.as_ref().and_then(|a| a.id);
-                let year = album
-                    .release_date_original
-                    .as_ref()
-                    .and_then(|d| d.split('-').next())
-                    .unwrap_or("0000")
-                    .to_string();
-
-                let artist_folder = format!("{} - {}", artist_id.unwrap_or(0), sanitize(&artist));
-                let album_folder = format!("{} - {}", album_id_clone, sanitize(&album_title));
-                let dir = output_dir_clone
-                    .join(&artist_folder)
-                    .join(&year)
-                    .join(&album_folder);
-                let _ = std::fs::create_dir_all(&dir);
-
-                if let Some(image) = &album.image {
-                    if let Some(cover_url) = image.large.as_ref().or(image.small.as_ref()) {
-                        if let Ok(resp) = reqwest::blocking::get(cover_url) {
-                            if let Ok(bytes) = resp.bytes() {
-                                let cover_path = dir.join("cover.jpg");
-                                let _ = std::fs::write(&cover_path, &bytes);
-                            }
-                        }
-                    }
-                }
-
-                for (idx, track_id) in track_ids.into_iter().enumerate() {
-                    let track = service
-                        .get_track(track_id)
-                        .map_err(|e| format!("get_track {}: {}", track_id, e))?;
-
-                    let file_url = service
-                        .get_track_file_url(track_id, format_id)
-                        .map_err(|e| format!("file url: {}", e))?;
-                    let url = file_url.url.ok_or("no url")?;
-
-                    let temp_path = output_dir_clone.join(format!("{}.flac", track_id));
-                    let resp = reqwest::blocking::get(&url).map_err(|e| e.to_string())?;
-                    let bytes = resp.bytes().map_err(|e| e.to_string())?;
-                    std::fs::write(&temp_path, &bytes).map_err(|e| e.to_string())?;
-
-                    let title = track.title.unwrap_or_else(|| format!("Track {}", track_id));
-                    let track_artist = track
-                        .performer
-                        .as_ref()
-                        .and_then(|p| p.name.clone())
-                        .unwrap_or_else(|| artist.clone());
-                    let track_artist_id = track.performer.as_ref().and_then(|p| p.id).or(artist_id);
-                    let genre = album.genre.as_ref().and_then(|g| g.name.clone());
-                    if let Ok(mut tagged) = lofty::read_from_path(&temp_path) {
-                        let mut tag = tagged
-                            .primary_tag_mut()
-                            .cloned()
-                            .unwrap_or_else(|| Tag::new(TagType::VorbisComments));
-                        tag.set_title(title.clone());
-                        tag.set_artist(track_artist.clone());
-                        tag.set_album(album_title.clone());
-                        if let Some(g) = &genre {
-                            tag.set_genre(g.clone());
-                        }
-                        tagged.insert_tag(tag);
-                        let _ = tagged.save_to_path(&temp_path, WriteOptions::default());
-                    }
-
-                    let track_num = track.track_number.unwrap_or((idx + 1) as i32);
-                    let filename =
-                        format!("{:02}. {} - {}.flac", track_num, track_id, sanitize(&title));
-                    let final_path = dir.join(filename);
-                    let _ = std::fs::rename(&temp_path, &final_path);
-
-                    let rt = tokio::runtime::Handle::current();
-                    rt.block_on(index_downloaded_track(
-                        final_path.to_str().unwrap_or(""),
-                        &title,
-                        &track_artist,
-                        track_artist_id,
-                        &album_title,
-                        Some(track_num),
-                        None,
-                        genre.as_deref(),
-                    ));
-
-                    saved.push(final_path.display().to_string());
-                }
-            }
-            Ok::<_, String>(saved)
-        })
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-
-        return Ok(Json(serde_json::json!({
-            "type": "album",
-            "album_id": album_id,
-            "format_id": format_id,
-            "paths": paths
-        })));
-    }
-
-    let track_id = params.track_id.ok_or((
-        axum::http::StatusCode::BAD_REQUEST,
-        "track_id or album_id required".into(),
-    ))?;
-    info!("Downloading track {} via stream URL", track_id);
-
-    let path = download_track_to_library(source, track_id, format_id)
-        .await
-        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-
-    Ok(Json(serde_json::json!({
-        "type": "track",
-        "track_id": track_id,
-        "format_id": format_id,
-        "path": path
-    })))
-}
-
-async fn qobuz_album_id(
-    State(state): State<AppState>,
-    Query(params): Query<SearchParams>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let guard = state.qobuz.lock().await;
-    let source = guard.as_ref().ok_or((
-        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        "Qobuz not authenticated".into(),
-    ))?;
-
-    let query = params.q.clone().unwrap_or_default();
-    if query.is_empty() {
-        return Err((axum::http::StatusCode::BAD_REQUEST, "Missing q".into()));
-    }
-
-    let service = source.service();
-    let query_clone = query.clone();
-
-    let album_id = tokio::task::spawn_blocking(move || {
-        let mut service = service.blocking_lock();
-        let result = service
-            .search_albums(&query_clone, Some(1), None)
-            .map_err(|e| e.to_string())?;
-        result
-            .items
-            .and_then(|items| items.into_iter().next())
-            .and_then(|album| album.id)
-            .ok_or_else(|| "No album found".to_string())
-    })
-    .await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .map_err(|e| (axum::http::StatusCode::NOT_FOUND, e))?;
-
-    Ok(Json(serde_json::json!({
-        "query": query,
-        "album_id": album_id
-    })))
-}
-
-async fn qobuz_queue_albums(
-    State(state): State<AppState>,
-    Query(params): Query<ArtistQueueParams>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let artist_id = params.artist_id;
-    let limit = params.limit.unwrap_or(50);
-
-    let guard = state.qobuz.lock().await;
-    let source = guard.as_ref().ok_or((
-        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        "Qobuz not authenticated".into(),
-    ))?;
-
-    let library = library::Library::new("cadence.db")
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let service = source.service();
-
-    let albums = tokio::task::spawn_blocking(move || {
-        let mut service = service.blocking_lock();
-        let result = service
-            .get_release_list(artist_id, Some(limit), None)
-            .map_err(|e| e.to_string())?;
-        Ok::<_, String>(result.items.unwrap_or_default())
-    })
-    .await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-
-    let mut queued = 0;
-    for album in albums {
-        if let Some(album_id) = album.id {
-            let title = album.title.unwrap_or_default();
-            let artist = album
-                .artist
-                .as_ref()
-                .and_then(|a| a.name.clone())
-                .unwrap_or_default();
-
-            let _ = sqlx::query(
-                "INSERT OR IGNORE INTO album_queue (album_id, artist, artist_id, title) VALUES (?, ?, ?, ?)"
-            )
-            .bind(&album_id)
-            .bind(&artist)
-            .bind(artist_id)
-            .bind(&title)
-            .execute(&library.pool)
-            .await;
-
-            queued += 1;
-        }
-    }
-
-    Ok(Json(serde_json::json!({
-        "artist_id": artist_id,
-        "limit": limit,
-        "queued": queued
-    })))
-}
-
-async fn qobuz_queue_artists(
-    State(state): State<AppState>,
-    Query(params): Query<SearchParams>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let query = params.q.unwrap_or_default();
-    if query.is_empty() {
-        return Err((axum::http::StatusCode::BAD_REQUEST, "Missing q".into()));
-    }
-
-    let limit = params.limit.unwrap_or(50);
-
-    let guard = state.qobuz.lock().await;
-    let source = guard.as_ref().ok_or((
-        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        "Qobuz not authenticated".into(),
-    ))?;
-
-    let library = library::Library::new("cadence.db")
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let service = source.service();
-    let query_clone = query.clone();
-
-    let artists = tokio::task::spawn_blocking(move || {
-        let mut service = service.blocking_lock();
-        let result = service
-            .search_artists(&query_clone, Some(limit), None)
-            .map_err(|e| e.to_string())?;
-        Ok::<_, String>(result.items.unwrap_or_default())
-    })
-    .await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-
-    let mut queued = 0;
-    for artist in artists {
-        if let (Some(id), Some(name)) = (artist.id, artist.name) {
-            let _ = sqlx::query("INSERT OR IGNORE INTO artists (artist_id, name) VALUES (?, ?)")
-                .bind(id)
-                .bind(&name)
-                .execute(&library.pool)
-                .await;
-            queued += 1;
-        }
-    }
-
-    Ok(Json(serde_json::json!({
-        "query": query,
-        "limit": limit,
-        "queued": queued
-    })))
-}
-
-async fn qobuz_queue_albums_from_artists(
-    State(state): State<AppState>,
-    Query(params): Query<LimitParams>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let limit = params.limit.unwrap_or(50);
-
-    let guard = state.qobuz.lock().await;
-    let source = guard.as_ref().ok_or((
-        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        "Qobuz not authenticated".into(),
-    ))?;
-
-    let library = library::Library::new("cadence.db")
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let artists: Vec<(i32, String)> = sqlx::query_as("SELECT artist_id, name FROM artists")
-        .fetch_all(&library.pool)
-        .await
-        .unwrap_or_default();
-
-    let artists_processed = artists.len();
-    let mut total_queued = 0;
-
-    for (artist_id, name) in artists {
-        let already_queued: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM album_queue WHERE artist_id = ?")
-                .bind(artist_id)
-                .fetch_one(&library.pool)
-                .await
-                .unwrap_or(0);
-
-        if already_queued > 0 {
-            continue;
-        }
-
-        match download_albums_for_artist(source, artist_id, limit, 6).await {
-            Ok(album_ids) => {
-                for album_id in album_ids {
-                    let result = sqlx::query(
-                        "INSERT OR IGNORE INTO album_queue (album_id, artist, artist_id, title) VALUES (?, ?, ?, ?)"
-                    )
-                    .bind(&album_id)
-                    .bind(&name)
-                    .bind(artist_id)
-                    .bind("")
-                    .execute(&library.pool)
-                    .await;
-
-                    if let Ok(r) = result {
-                        if r.rows_affected() > 0 {
-                            total_queued += 1;
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Failed to fetch albums for artist {}: {}", artist_id, e);
-            }
-        }
-    }
-
-    Ok(Json(serde_json::json!({
-        "artists_processed": artists_processed,
-        "limit_per_artist": limit,
-        "new_albums_queued": total_queued
-    })))
-}
-
-async fn download_albums_for_artist(
-    source: &QobuzSource,
-    artist_id: i32,
-    limit: i32,
-    _format_id: i32,
-) -> Result<Vec<String>, String> {
-    let service = source.service();
-    let album_ids = tokio::task::spawn_blocking({
-        let service = service.clone();
-        move || {
-            let mut service = service.blocking_lock();
-            let result = service
-                .get_release_list(artist_id, Some(limit), None)
-                .map_err(|e| e.to_string())?;
-            let ids: Vec<String> = result
-                .items
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|a| a.id)
-                .collect();
-            Ok::<_, String>(ids)
-        }
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
-    Ok(album_ids)
-}
-
-async fn qobuz_download_artist_albums(
-    State(state): State<AppState>,
-    Query(params): Query<ArtistDownloadParams>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let guard = state.qobuz.lock().await;
-    let source = guard.as_ref().ok_or((
-        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        "Qobuz not authenticated".into(),
-    ))?;
-
-    let ids = download_albums_for_artist(
-        source,
-        params.artist_id,
-        params.limit.unwrap_or(10),
-        params.format_id.unwrap_or(6),
-    )
-    .await
-    .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-
-    Ok(Json(serde_json::json!({
-        "artist_id": params.artist_id,
-        "albums": ids
-    })))
-}
-
-async fn library_search(
-    Query(params): Query<SearchParams>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let library = library::Library::new("cadence.db").await.map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("DB error: {}", e),
-        )
-    })?;
-
-    let query = params.q.unwrap_or_default();
-    let results = library.search(&query).await.map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Search error: {}", e),
-        )
-    })?;
-
-    Ok(Json(
-        serde_json::json!({ "query": query, "tracks": results }),
-    ))
-}
-
-async fn library_scan() -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let library = library::Library::new("cadence.db").await.map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("DB error: {}", e),
-        )
-    })?;
-
-    let (added, updated, removed) =
-        library::scan_directory(&library, std::path::Path::new("library"))
-            .await
-            .map_err(|e| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Scan error: {}", e),
-                )
-            })?;
-
-    Ok(Json(serde_json::json!({
-        "added": added,
-        "updated": updated,
-        "removed": removed
-    })))
-}
-
-async fn library_stream_local(
-    Query(params): Query<LibraryStreamParams>,
-) -> Result<impl axum::response::IntoResponse, (axum::http::StatusCode, String)> {
-    let path = params
-        .path
-        .ok_or((axum::http::StatusCode::BAD_REQUEST, "Missing path".into()))?;
-
-    let bytes = tokio::fs::read(&path).await.map_err(|e| {
-        (
-            axum::http::StatusCode::NOT_FOUND,
-            format!("Failed to read file: {}", e),
-        )
-    })?;
-
-    let mime = if path.ends_with(".flac") {
-        "audio/flac"
-    } else {
-        "audio/wav"
-    };
-
-    Ok(([(axum::http::header::CONTENT_TYPE, mime)], bytes))
-}
-
-async fn library_stream_qobuz(
-    State(state): State<AppState>,
-    Query(params): Query<QobuzStreamParams>,
-) -> Result<impl axum::response::IntoResponse, (axum::http::StatusCode, String)> {
-    let track_id = params.track_id;
-    let format_id = params.format_id.unwrap_or(6);
-
-    let library = library::Library::new("cadence.db")
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let existing_path: Option<String> =
-        sqlx::query_scalar("SELECT path FROM tracks WHERE path LIKE ? LIMIT 1")
-            .bind(format!("%{} - %", track_id))
-            .fetch_optional(&library.pool)
-            .await
-            .unwrap_or(None);
-
-    let path = if let Some(p) = existing_path {
-        if std::path::Path::new(&p).exists() {
-            p
-        } else {
-            let guard = state.qobuz.lock().await;
-            let source = guard.as_ref().ok_or((
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Qobuz not authenticated".into(),
-            ))?;
-            download_track_to_library(source, track_id, format_id)
-                .await
-                .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?
-        }
-    } else {
-        let guard = state.qobuz.lock().await;
-        let source = guard.as_ref().ok_or((
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "Qobuz not authenticated".into(),
-        ))?;
-        download_track_to_library(source, track_id, format_id)
-            .await
-            .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?
-    };
-
-    let bytes = tokio::fs::read(&path).await.map_err(|e| {
-        (
-            axum::http::StatusCode::NOT_FOUND,
-            format!("Failed to read local file: {}", e),
-        )
-    })?;
-
-    let mime = if path.ends_with(".flac") {
-        "audio/flac"
-    } else {
-        "audio/wav"
-    };
-
-    Ok(([(axum::http::header::CONTENT_TYPE, mime)], bytes))
-}
-
-async fn library_ai_search(
-    Query(params): Query<SearchParams>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let query = params.q.unwrap_or_default();
-    if query.is_empty() {
-        return Err((axum::http::StatusCode::BAD_REQUEST, "Missing q".into()));
-    }
-
-    let library = library::Library::new("cadence.db")
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let artists: Vec<String> =
-        sqlx::query_scalar("SELECT DISTINCT artist FROM tracks WHERE artist IS NOT NULL")
-            .fetch_all(&library.pool)
-            .await
-            .unwrap_or_default();
-
-    let prompt = format!(
-        "You are helping search a personal music library.\n\
-         User query: \"{}\"\n\
-         Artists in the library: {}.\n\
-         Which of these artists match the query? \
-         Reply with ONLY a JSON array of matching artist names, nothing else.\n\
-         Example: [\"Miles Davis\"] or []\n\
-         Do not use markdown.",
-        query,
-        artists.join(", ")
-    );
-
-    let api_key = std::env::var("GEMINI_API_KEY").map_err(|_| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "GEMINI_API_KEY not set".into(),
-        )
-    })?;
-
-    let model_url = std::env::var("GEMINI_MODEL_URL")
-        .unwrap_or_else(|_| "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent".to_string());
-
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(format!("{}?key={}", model_url, api_key))
-        .json(&serde_json::json!({
-            "contents": [{
-                "parts": [{ "text": prompt }]
-            }]
-        }))
-        .send()
-        .await
-        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e.to_string()))?;
-
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e.to_string()))?;
-
-    let reply = json["candidates"][0]["content"]["parts"][0]["text"]
-        .as_str()
-        .unwrap_or("[]")
-        .trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim()
-        .to_string();
-
-    tracing::info!("Gemini cleaned reply: {}", reply);
-
-    let matched_artists: Vec<String> = serde_json::from_str(&reply).unwrap_or_default();
-
-    let mut all_tracks = Vec::new();
-    for artist in matched_artists {
-        if let Ok(tracks) = library.search(&artist).await {
-            all_tracks.extend(tracks);
-        }
-    }
-
-    Ok(Json(serde_json::json!({
-        "query": query,
-        "ai_reply": reply,
-        "tracks": all_tracks
-    })))
 }
 
 fn sanitize(s: &str) -> String {
@@ -1085,4 +364,255 @@ fn sanitize(s: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+#[derive(Deserialize)]
+struct AlbumIdParams {
+    q: String,
+}
+
+async fn qobuz_album_id(
+    State(state): State<AppState>,
+    Query(params): Query<AlbumIdParams>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let q = state.qobuz.lock().await;
+    let source = q.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Qobuz not available".into(),
+    ))?;
+    let service = source.service();
+    let query = params.q.clone();
+
+    let album_id = tokio::task::spawn_blocking(move || {
+        let mut service = service.blocking_lock();
+        let results = service
+            .search_albums(&query, Some(1), None)
+            .map_err(|e| e.to_string())?;
+        Ok::<_, String>(
+            results
+                .items
+                .and_then(|i| i.into_iter().next())
+                .and_then(|a| a.id),
+        )
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({ "album_id": album_id })))
+}
+
+#[derive(Deserialize)]
+struct QueueAlbumsParams {
+    artist_id: i32,
+    limit: Option<i32>,
+}
+
+async fn qobuz_queue_albums(
+    State(_state): State<AppState>,
+    Query(_params): Query<QueueAlbumsParams>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "queued": 0 }))
+}
+
+#[derive(Deserialize)]
+struct QueueArtistsParams {
+    q: String,
+    limit: Option<i32>,
+}
+
+async fn qobuz_queue_artists(
+    State(_state): State<AppState>,
+    Query(_params): Query<QueueArtistsParams>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "queued": 0 }))
+}
+
+async fn qobuz_queue_albums_from_artists(
+    State(_state): State<AppState>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "queued": 0 }))
+}
+
+async fn qobuz_download_artist_albums(
+    State(state): State<AppState>,
+    Query(params): Query<QueueAlbumsParams>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let q = state.qobuz.lock().await;
+    let source = q.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Qobuz not available".into(),
+    ))?;
+    let limit = params.limit.unwrap_or(10);
+    let service = source.service();
+
+    let releases = tokio::task::spawn_blocking(move || {
+        let mut service = service.blocking_lock();
+        service
+            .get_release_list(params.artist_id, Some(limit), None)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({
+        "albums": releases.items
+    })))
+}
+
+#[derive(Deserialize)]
+struct LibrarySearchParams {
+    q: String,
+}
+
+async fn library_search(
+    State(state): State<AppState>,
+    Query(params): Query<LibrarySearchParams>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let results = state
+        .library
+        .search(&params.q)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "query": params.q,
+        "tracks": results
+    })))
+}
+
+async fn library_scan(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let lib_path = std::env::var("LIBRARY_PATH").unwrap_or_else(|_| "library".into());
+    // Adjust method name if your Library uses a different one
+    let scanned = state
+        .library
+        .scan_directory(&lib_path)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "scanned": scanned })))
+}
+
+/// Full range-aware FLAC streaming.
+/// Supports `Range: bytes=start-end` and returns 206 Partial Content.
+async fn stream_local(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    let path = params
+        .get("path")
+        .ok_or((StatusCode::BAD_REQUEST, "missing path".into()))?;
+    let file_path = std::path::Path::new(path);
+
+    let mut file = tokio::fs::File::open(file_path)
+        .await
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let file_size = metadata.len();
+
+    let mut status = StatusCode::OK;
+    let mut start: u64 = 0;
+    let mut end: u64 = file_size.saturating_sub(1);
+    let mut content_length = file_size;
+
+    if let Some(range_header) = headers.get(header::RANGE) {
+        if let Ok(range_str) = range_header.to_str() {
+            if let Some(range) = range_str.strip_prefix("bytes=") {
+                let parts: Vec<&str> = range.split('-').collect();
+                if parts.len() == 2 {
+                    if !parts[0].is_empty() {
+                        start = parts[0].parse().unwrap_or(0);
+                    }
+                    if !parts[1].is_empty() {
+                        end = parts[1].parse().unwrap_or(end);
+                    }
+                    if start > end || start >= file_size {
+                        return Err((StatusCode::RANGE_NOT_SATISFIABLE, "invalid range".into()));
+                    }
+                    end = end.min(file_size.saturating_sub(1));
+                    content_length = end - start + 1;
+                    status = StatusCode::PARTIAL_CONTENT;
+
+                    file.seek(SeekFrom::Start(start))
+                        .await
+                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                }
+            }
+        }
+    }
+
+    let limited = file.take(content_length);
+    let stream = tokio_util::io::ReaderStream::new(limited);
+    let body = Body::from_stream(stream);
+
+    let mut builder = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "audio/flac")
+        .header(header::CONTENT_LENGTH, content_length)
+        .header(header::ACCEPT_RANGES, "bytes");
+
+    if status == StatusCode::PARTIAL_CONTENT {
+        builder = builder.header(
+            header::CONTENT_RANGE,
+            format!("bytes {}-{}/{}", start, end, file_size),
+        );
+    }
+
+    Ok(builder.body(body).unwrap())
+}
+
+async fn stream_qobuz(
+    State(state): State<AppState>,
+    Query(params): Query<StreamParams>,
+    headers: HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    let format_id = params.format_id.unwrap_or(6);
+
+    // 1. Try to find an already-downloaded local file for this track_id
+    if let Ok(Some(path)) = state.library.find_path_by_track_id(params.track_id).await {
+        // Re-use the range-aware local streamer
+        let mut q = std::collections::HashMap::new();
+        q.insert("path".to_string(), path);
+        return stream_local(Query(q), headers).await;
+    }
+
+    // 2. Fall back to a live Qobuz stream URL (no seeking yet)
+    let q = state.qobuz.lock().await;
+    let source = q.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Qobuz not available".into(),
+    ))?;
+
+    let service = source.service();
+    let file_url = tokio::task::spawn_blocking(move || {
+        let mut service = service.blocking_lock();
+        service
+            .get_track_file_url(params.track_id, format_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let url = file_url
+        .url
+        .ok_or((StatusCode::NOT_FOUND, "No stream URL from Qobuz".into()))?;
+
+    // Simple redirect to the Qobuz CDN URL
+    Ok(Response::builder()
+        .status(StatusCode::FOUND)
+        .header(header::LOCATION, url)
+        .body(Body::empty())
+        .unwrap())
+}
+
+async fn library_ai_search(
+    Query(_params): Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "message": "AI search placeholder" }))
 }
