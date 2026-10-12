@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Cadence Music Server – Database Schema</title>
+    <style>
+        body {
+            font-family: system-ui, sans-serif;
+            margin: 2rem;
+            background: #fafafa;
+        }
+
+        h1,
+        h2 {
+            color: #222;
+        }
+
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            background: white;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, .1);
+            margin-bottom: 2rem;
+        }
+
+        th,
+        td {
+            border: 1px solid #ddd;
+            padding: 0.6rem 0.8rem;
+            text-align: left;
+            vertical-align: top;
+        }
+
+        th {
+            background: #f0f0f0;
+            font-weight: 600;
+        }
+
+        tr:nth-child(even) {
+            background: #f9f9f9;
+        }
+
+        code {
+            background: #eee;
+            padding: 0.1rem 0.3rem;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Cadence Music Server – Database Schema</h1>
+
+    <h2>tracks</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Column</th>
+                <th>Type</th>
+                <th>Purpose</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><code>id</code></td>
+                <td>INTEGER PRIMARY KEY</td>
+                <td>Auto-incrementing internal ID</td>
+            </tr>
+            <tr>
+                <td><code>path</code></td>
+                <td>TEXT UNIQUE NOT NULL</td>
+                <td>Absolute or relative path to the audio file</td>
+            </tr>
+            <tr>
+                <td><code>title</code></td>
+                <td>TEXT</td>
+                <td>Track title (from tags or Qobuz)</td>
+            </tr>
+            <tr>
+                <td><code>artist</code></td>
+                <td>TEXT</td>
+                <td>Primary artist name</td>
+            </tr>
+            <tr>
+                <td><code>artist_id</code></td>
+                <td>INTEGER</td>
+                <td>Qobuz artist ID (when known)</td>
+            </tr>
+            <tr>
+                <td><code>album</code></td>
+                <td>TEXT</td>
+                <td>Album title</td>
+            </tr>
+            <tr>
+                <td><code>track_number</code></td>
+                <td>INTEGER</td>
+                <td>Track number on the album</td>
+            </tr>
+            <tr>
+                <td><code>duration</code></td>
+                <td>REAL</td>
+                <td>Duration in seconds</td>
+            </tr>
+            <tr>
+                <td><code>format</code></td>
+                <td>TEXT</td>
+                <td>File format (flac, wav, mp3, …)</td>
+            </tr>
+            <tr>
+                <td><code>stream_url</code></td>
+                <td>TEXT</td>
+                <td>Local streaming URL for the file</td>
+            </tr>
+            <tr>
+                <td><code>genre</code></td>
+                <td>TEXT</td>
+                <td>Genre name (from album tags or Qobuz album)</td>
+            </tr>
+            <tr>
+                <td><code>updated_at</code></td>
+                <td>TEXT</td>
+                <td>ISO timestamp of the last upsert</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h2>genres</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Column</th>
+                <th>Type</th>
+                <th>Purpose</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><code>id</code></td>
+                <td>INTEGER PRIMARY KEY</td>
+                <td>Auto-incrementing genre ID</td>
+            </tr>
+            <tr>
+                <td><code>name</code></td>
+                <td>TEXT UNIQUE NOT NULL</td>
+                <td>Unique genre name</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h2>track_genres</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Column</th>
+                <th>Type</th>
+                <th>Purpose</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><code>track_id</code></td>
+                <td>INTEGER NOT NULL</td>
+                <td>References tracks.id</td>
+            </tr>
+            <tr>
+                <td><code>genre_id</code></td>
+                <td>INTEGER NOT NULL</td>
+                <td>References genres.id</td>
+            </tr>
+            <tr>
+                <td colspan="3">PRIMARY KEY (track_id, genre_id)</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h2>artists</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Column</th>
+                <th>Type</th>
+                <th>Purpose</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><code>artist_id</code></td>
+                <td>INTEGER PRIMARY KEY</td>
+                <td>Qobuz artist ID</td>
+            </tr>
+            <tr>
+                <td><code>name</code></td>
+                <td>TEXT NOT NULL</td>
+                <td>Artist name</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h2>album_queue</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Column</th>
+                <th>Type</th>
+                <th>Purpose</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><code>album_id</code></td>
+                <td>TEXT PRIMARY KEY</td>
+                <td>Qobuz album ID</td>
+            </tr>
+            <tr>
+                <td><code>artist</code></td>
+                <td>TEXT</td>
+                <td>Artist name (denormalized)</td>
+            </tr>
+            <tr>
+                <td><code>artist_id</code></td>
+                <td>INTEGER</td>
+                <td>Qobuz artist ID</td>
+            </tr>
+            <tr>
+                <td><code>title</code></td>
+                <td>TEXT</td>
+                <td>Album title</td>
+            </tr>
+        </tbody>
+    </table>
+</body>
+
+</html>

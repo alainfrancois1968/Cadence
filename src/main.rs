@@ -352,7 +352,11 @@ async fn download_track_to_library(
                 .and_then(|a| a.id.clone())
                 .unwrap_or_default();
             // qobuz-api Track has no genre field
-            let genre: Option<String> = None;
+            let genre = track
+                .album
+                .as_ref()
+                .and_then(|a| a.genre.as_ref())
+                .and_then(|g| g.name.clone());
 
             if let Ok(mut tagged) = lofty::read_from_path(&temp_path) {
                 let mut tag = tagged
@@ -509,7 +513,7 @@ async fn qobuz_download(
                         .and_then(|p| p.name.clone())
                         .unwrap_or_else(|| artist.clone());
                     let track_artist_id = track.performer.as_ref().and_then(|p| p.id).or(artist_id);
-                    let genre: Option<String> = None;
+                    let genre = album.genre.as_ref().and_then(|g| g.name.clone());
                     if let Ok(mut tagged) = lofty::read_from_path(&temp_path) {
                         let mut tag = tagged
                             .primary_tag_mut()
