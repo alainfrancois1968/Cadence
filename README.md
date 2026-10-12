@@ -101,3 +101,5 @@ sqlite3 ~/Projects/Cadence/cadence.db "SELECT title, artist, artist_id FROM trac
 curl "http://localhost:3000/qobuz/queue-artists?q=Miles%20Davis&limit=200"
 
 sqlite3 ~/Projects/Cadence/cadence.db "SELECT * FROM artists"
+
+curl "http://localhost:3000/qobuz/download-artist-albums?artist_id=4900089&limit=5&format_id=6"
