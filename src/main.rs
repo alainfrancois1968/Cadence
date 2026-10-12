@@ -253,6 +253,10 @@ async fn index_downloaded_track(
     duration: Option<f64>,
 ) {
     if let Ok(library) = library::Library::new("cadence.db").await {
+        let stream_url = format!(
+            "http://localhost:3000/library/stream_local?path={}",
+            urlencoding::encode(path)
+        );
         let _ = library
             .upsert_track(
                 path,
@@ -263,6 +267,7 @@ async fn index_downloaded_track(
                 track_number,
                 duration,
                 "flac",
+                Some(&stream_url),
             )
             .await;
     }

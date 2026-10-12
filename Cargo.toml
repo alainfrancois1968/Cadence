@@ -23,3 +23,5 @@ strsim = "0.11"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 lofty = "0.21"
 walkdir = "2"
+
+urlencoding = "2"
