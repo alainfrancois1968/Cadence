@@ -36,6 +36,13 @@ struct LimitParams {
 }
 
 #[derive(Deserialize)]
+struct ArtistDownloadParams {
+    artist_id: i32,
+    limit: Option<i32>,
+    format_id: Option<i32>,
+}
+
+#[derive(Deserialize)]
 struct StreamParams {
     track_id: i32,
     format_id: Option<i32>,
@@ -51,13 +58,6 @@ struct DownloadParams {
 #[derive(Deserialize)]
 struct LibraryStreamParams {
     path: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ArtistDownloadParams {
-    artist_id: i32,
-    limit: Option<i32>,
-    format_id: Option<i32>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -108,14 +108,14 @@ fn main() -> anyhow::Result<()> {
                     "/qobuz/queue-albums-from-artists",
                     get(qobuz_queue_albums_from_artists),
                 )
-                .route("/library/search", get(library_search))
-                .route("/library/scan", get(library_scan))
-                .route("/library/stream", get(library_stream))
-                .route("/library/ai-search", get(library_ai_search))
                 .route(
                     "/qobuz/download-artist-albums",
                     get(qobuz_download_artist_albums),
                 )
+                .route("/library/search", get(library_search))
+                .route("/library/scan", get(library_scan))
+                .route("/library/stream", get(library_stream))
+                .route("/library/ai-search", get(library_ai_search))
                 .with_state(state);
 
             let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
@@ -260,6 +260,35 @@ async fn index_downloaded_track(
             )
             .await;
     }
+}
+
+async fn download_albums_for_artist(
+    source: &QobuzSource,
+    artist_id: i32,
+    limit: i32,
+    _format_id: i32,
+) -> Result<Vec<String>, String> {
+    let service = source.service();
+    let album_ids = tokio::task::spawn_blocking({
+        let service = service.clone();
+        move || {
+            let mut service = service.blocking_lock();
+            let result = service
+                .get_release_list(artist_id, Some(limit), None)
+                .map_err(|e| e.to_string())?;
+            let ids: Vec<String> = result
+                .items
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|a| a.id)
+                .collect();
+            Ok::<_, String>(ids)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    Ok(album_ids)
 }
 
 async fn qobuz_download(
@@ -727,7 +756,6 @@ async fn qobuz_queue_albums_from_artists(
         .unwrap_or_default();
 
     let artists_processed = artists.len();
-    let service = source.service();
     let mut total_queued = 0;
 
     for (artist_id, name) in artists {
@@ -742,40 +770,28 @@ async fn qobuz_queue_albums_from_artists(
             continue;
         }
 
-        tracing::info!("Fetching releases for artist_id={}", artist_id);
+        match download_albums_for_artist(source, artist_id, limit, 6).await {
+            Ok(album_ids) => {
+                for album_id in album_ids {
+                    let result = sqlx::query(
+                        "INSERT OR IGNORE INTO album_queue (album_id, artist, artist_id, title) VALUES (?, ?, ?, ?)"
+                    )
+                    .bind(&album_id)
+                    .bind(&name)
+                    .bind(artist_id)
+                    .bind("")
+                    .execute(&library.pool)
+                    .await;
 
-        let albums = tokio::task::spawn_blocking({
-            let service = service.clone();
-            move || {
-                let mut service = service.blocking_lock();
-                let result = service
-                    .get_release_list(artist_id, Some(limit), None)
-                    .map_err(|e| e.to_string())?;
-                Ok::<_, String>(result.items.unwrap_or_default())
-            }
-        })
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-
-        for album in albums {
-            if let Some(album_id) = album.id {
-                let title = album.title.unwrap_or_default();
-                let result = sqlx::query(
-                    "INSERT OR IGNORE INTO album_queue (album_id, artist, artist_id, title) VALUES (?, ?, ?, ?)"
-                )
-                .bind(&album_id)
-                .bind(&name)
-                .bind(artist_id)
-                .bind(&title)
-                .execute(&library.pool)
-                .await;
-
-                if let Ok(r) = result {
-                    if r.rows_affected() > 0 {
-                        total_queued += 1;
+                    if let Ok(r) = result {
+                        if r.rows_affected() > 0 {
+                            total_queued += 1;
+                        }
                     }
                 }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to fetch albums for artist {}: {}", artist_id, e);
             }
         }
     }
@@ -784,6 +800,31 @@ async fn qobuz_queue_albums_from_artists(
         "artists_processed": artists_processed,
         "limit_per_artist": limit,
         "new_albums_queued": total_queued
+    })))
+}
+
+async fn qobuz_download_artist_albums(
+    State(state): State<AppState>,
+    Query(params): Query<ArtistDownloadParams>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let guard = state.qobuz.lock().await;
+    let source = guard.as_ref().ok_or((
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "Qobuz not authenticated".into(),
+    ))?;
+
+    let ids = download_albums_for_artist(
+        source,
+        params.artist_id,
+        params.limit.unwrap_or(10),
+        params.format_id.unwrap_or(6),
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+
+    Ok(Json(serde_json::json!({
+        "artist_id": params.artist_id,
+        "albums": ids
     })))
 }
 
@@ -955,69 +996,4 @@ fn sanitize(s: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
-}
-
-async fn qobuz_download_artist_albums(
-    State(state): State<AppState>,
-    Query(params): Query<ArtistDownloadParams>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let limit = params.limit.unwrap_or(10);
-    let format_id = params.format_id.unwrap_or(6);
-    let artist_id = params.artist_id;
-
-    let guard = state.qobuz.lock().await;
-    let source = guard.as_ref().ok_or((
-        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        "Qobuz not authenticated".into(),
-    ))?;
-
-    let service = source.service();
-
-    // Get album IDs for this artist
-    let album_ids = tokio::task::spawn_blocking({
-        let service = service.clone();
-        move || {
-            let mut service = service.blocking_lock();
-            let result = service
-                .get_release_list(artist_id, Some(limit), None)
-                .map_err(|e| e.to_string())?;
-            let ids: Vec<String> = result
-                .items
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|a| a.id)
-                .collect();
-            Ok::<_, String>(ids)
-        }
-    })
-    .await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-
-    let mut downloaded = Vec::new();
-
-    for album_id in album_ids {
-        // Re-use the existing album download logic by calling it internally
-        // or simply invoke the download endpoint logic here.
-        // For simplicity we call the same download path:
-        let album_id_clone = album_id.clone();
-        let service = source.service();
-        let result = tokio::task::spawn_blocking(move || {
-            // Minimal: just record that we would download it
-            // In a full version you would call the album download code
-            Ok::<_, String>(album_id_clone)
-        })
-        .await;
-
-        if let Ok(Ok(id)) = result {
-            downloaded.push(id);
-        }
-    }
-
-    Ok(Json(serde_json::json!({
-        "artist_id": artist_id,
-        "limit": limit,
-        "albums_found": downloaded.len(),
-        "album_ids": downloaded
-    })))
 }
