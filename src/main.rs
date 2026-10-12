@@ -258,6 +258,7 @@ async fn index_downloaded_track(
     album: &str,
     track_number: Option<i32>,
     duration: Option<f64>,
+    genre: Option<&str>,
 ) {
     if let Ok(library) = library::Library::new("cadence.db").await {
         let stream_url = format!(
@@ -275,6 +276,7 @@ async fn index_downloaded_track(
                 duration,
                 "flac",
                 Some(&stream_url),
+                genre,
             )
             .await;
     }
@@ -349,6 +351,8 @@ async fn download_track_to_library(
                 .as_ref()
                 .and_then(|a| a.id.clone())
                 .unwrap_or_default();
+            // qobuz-api Track has no genre field
+            let genre: Option<String> = None;
 
             if let Ok(mut tagged) = lofty::read_from_path(&temp_path) {
                 let mut tag = tagged
@@ -358,6 +362,9 @@ async fn download_track_to_library(
                 tag.set_title(title.clone());
                 tag.set_artist(artist.clone());
                 tag.set_album(album.clone());
+                if let Some(g) = &genre {
+                    tag.set_genre(g.clone());
+                }
                 tagged.insert_tag(tag);
                 let _ = tagged.save_to_path(&temp_path, WriteOptions::default());
             }
@@ -392,6 +399,7 @@ async fn download_track_to_library(
                 &album,
                 track.track_number,
                 None,
+                genre.as_deref(),
             ));
 
             Ok::<_, String>(new_path.display().to_string())
@@ -501,7 +509,7 @@ async fn qobuz_download(
                         .and_then(|p| p.name.clone())
                         .unwrap_or_else(|| artist.clone());
                     let track_artist_id = track.performer.as_ref().and_then(|p| p.id).or(artist_id);
-
+                    let genre: Option<String> = None;
                     if let Ok(mut tagged) = lofty::read_from_path(&temp_path) {
                         let mut tag = tagged
                             .primary_tag_mut()
@@ -510,6 +518,9 @@ async fn qobuz_download(
                         tag.set_title(title.clone());
                         tag.set_artist(track_artist.clone());
                         tag.set_album(album_title.clone());
+                        if let Some(g) = &genre {
+                            tag.set_genre(g.clone());
+                        }
                         tagged.insert_tag(tag);
                         let _ = tagged.save_to_path(&temp_path, WriteOptions::default());
                     }
@@ -529,6 +540,7 @@ async fn qobuz_download(
                         &album_title,
                         Some(track_num),
                         None,
+                        genre.as_deref(),
                     ));
 
                     saved.push(final_path.display().to_string());
