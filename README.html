@@ -96,7 +96,7 @@
             </tr>
             <tr>
                 <td><code>GET /qobuz/stream</code></td>
-                <td>Get a temporary stream URL</td>
+                <td>Get a temporary Qobuz stream URL</td>
                 <td>—</td>
                 <td>—</td>
                 <td>—</td>
@@ -110,7 +110,7 @@
                 <td>—</td>
                 <td>FLAC files and cover.jpg under library/Qobuz/…</td>
                 <td>—</td>
-                <td>Upserts rows in tracks</td>
+                <td>Upserts rows in tracks (including stream_url)</td>
                 <td>Uses ID-prefixed folders</td>
                 <td><code>curl "http://localhost:3000/qobuz/download?album_id=5099749522428&format_id=6"</code></td>
             </tr>
@@ -180,19 +180,19 @@
                 <td>Reads files under library/</td>
                 <td>—</td>
                 <td>Reads existing paths from tracks</td>
-                <td>Upserts and deletes rows in tracks</td>
+                <td>Upserts and deletes rows in tracks (writes stream_url)</td>
                 <td>Preserves existing artist_id values</td>
                 <td><code>curl http://localhost:3000/library/scan</code></td>
             </tr>
             <tr>
-                <td><code>GET /library/stream</code></td>
+                <td><code>GET /library/stream_local</code></td>
                 <td>Stream a local file</td>
                 <td>Reads the requested file</td>
                 <td>—</td>
                 <td>—</td>
                 <td>—</td>
-                <td>Loads the whole file into memory</td>
-                <td><code>curl "http://localhost:3000/library/stream?path=library/Qobuz/…"</code></td>
+                <td>Loads the whole file into memory; URL is also stored in tracks.stream_url</td>
+                <td><code>curl "http://localhost:3000/library/stream_local?path=library/Qobuz/…"</code></td>
             </tr>
             <tr>
                 <td><code>GET /library/ai-search</code></td>
