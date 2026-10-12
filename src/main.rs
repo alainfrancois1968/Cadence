@@ -95,6 +95,7 @@ fn main() -> anyhow::Result<()> {
                 .route("/library/scan", get(library_scan))
                 .route("/library/stream", get(library_stream))
                 .route("/library/ai-search", get(library_ai_search))
+                .route("/qobuz/album-id", get(qobuz_album_id))
                 .with_state(state);
 
             let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
@@ -241,14 +242,101 @@ async fn qobuz_download(
         )
     })?;
 
+    let service = source.service();
+
+    // ---------- Album download ----------
+    if let Some(album_id) = params.album_id {
+        info!("Downloading album {}", album_id);
+        let album_id_clone = album_id.clone();
+        let output_dir_clone = output_dir.clone();
+        let paths = tokio::task::spawn_blocking(move || {
+            let mut service = service.blocking_lock();
+            let album = service
+                .get_album(&album_id_clone, Some("track_ids"))
+                .map_err(|e| format!("get_album failed: {}", e))?;
+            let mut saved = Vec::new();
+
+            if let Some(track_ids) = album.track_ids {
+                for (idx, track_id) in track_ids.into_iter().enumerate() {
+                    let track = service
+                        .get_track(track_id)
+                        .map_err(|e| format!("get_track {}: {}", track_id, e))?;
+
+                    let file_url = service
+                        .get_track_file_url(track_id, format_id)
+                        .map_err(|e| format!("file url: {}", e))?;
+                    let url = file_url.url.ok_or("no url")?;
+
+                    let temp_path = output_dir_clone.join(format!("{}.flac", track_id));
+                    let resp = reqwest::blocking::get(&url).map_err(|e| e.to_string())?;
+                    let bytes = resp.bytes().map_err(|e| e.to_string())?;
+                    std::fs::write(&temp_path, &bytes).map_err(|e| e.to_string())?;
+
+                    let title = track.title.unwrap_or_else(|| format!("Track {}", track_id));
+                    let artist = album
+                        .artist
+                        .as_ref()
+                        .and_then(|a| a.name.clone())
+                        .or_else(|| track.performer.as_ref().and_then(|p| p.name.clone()))
+                        .unwrap_or_else(|| "Unknown Artist".into());
+                    let album_title = album
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| "Unknown Album".into());
+
+                    if let Ok(mut tagged) = lofty::read_from_path(&temp_path) {
+                        let mut tag = tagged
+                            .primary_tag_mut()
+                            .cloned()
+                            .unwrap_or_else(|| Tag::new(TagType::VorbisComments));
+                        tag.set_title(title.clone());
+                        tag.set_artist(artist.clone());
+                        tag.set_album(album_title.clone());
+                        tagged.insert_tag(tag);
+                        let _ = tagged.save_to_path(&temp_path, WriteOptions::default());
+                    }
+
+                    let year = album
+                        .release_date_original
+                        .as_ref()
+                        .and_then(|d| d.split('-').next())
+                        .unwrap_or("0000")
+                        .to_string();
+                    let track_num = track.track_number.unwrap_or((idx + 1) as i32);
+
+                    let dir = output_dir_clone
+                        .join(sanitize(&artist))
+                        .join(&year)
+                        .join(sanitize(&album_title));
+                    let _ = std::fs::create_dir_all(&dir);
+
+                    let filename = format!("{:02}. {}.flac", track_num, sanitize(&title));
+                    let final_path = dir.join(filename);
+                    let _ = std::fs::rename(&temp_path, &final_path);
+                    saved.push(final_path.display().to_string());
+                }
+            }
+            Ok::<_, String>(saved)
+        })
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+
+        return Ok(Json(serde_json::json!({
+            "type": "album",
+            "album_id": album_id,
+            "format_id": format_id,
+            "paths": paths
+        })));
+    }
+
+    // ---------- Single track download ----------
     let track_id = params.track_id.ok_or((
         axum::http::StatusCode::BAD_REQUEST,
-        "track_id required".into(),
+        "track_id or album_id required".into(),
     ))?;
-
     info!("Downloading track {} via stream URL", track_id);
 
-    let service = source.service();
     let file_url = tokio::task::spawn_blocking({
         let service = service.clone();
         move || {
@@ -274,7 +362,6 @@ async fn qobuz_download(
         axum::http::StatusCode::BAD_GATEWAY,
         "No stream URL returned".into(),
     ))?;
-
     let temp_path = output_dir.join(format!("{}.flac", track_id));
 
     let client = reqwest::Client::new();
@@ -334,75 +421,36 @@ async fn qobuz_download(
                     .and_then(|a| a.title.clone())
                     .unwrap_or_else(|| "Unknown Album".into());
 
-                let mut tagged = lofty::read_from_path(&temp_path_clone)
-                    .map_err(|e| format!("lofty read: {}", e))?;
-                let mut tag = tagged
-                    .primary_tag_mut()
-                    .cloned()
-                    .unwrap_or_else(|| Tag::new(TagType::VorbisComments));
-                tag.set_title(title.clone());
-                tag.set_artist(artist.clone());
-                tag.set_album(album.clone());
-
-                // Cover art
-                if let Some(album_obj) = &track.album {
-                    if let Some(image_url) = album_obj
-                        .image
-                        .as_ref()
-                        .and_then(|img| img.large.as_ref().or(img.small.as_ref()))
-                    {
-                        if let Ok(resp) = reqwest::blocking::get(image_url) {
-                            if let Ok(bytes) = resp.bytes() {
-                                use lofty::picture::{MimeType, Picture, PictureType};
-                                let picture = Picture::new_unchecked(
-                                    PictureType::CoverFront,
-                                    Some(MimeType::Jpeg),
-                                    None,
-                                    bytes.to_vec(),
-                                );
-                                tag.set_picture(0, picture);
-                            }
-                        }
-                    }
+                if let Ok(mut tagged) = lofty::read_from_path(&temp_path_clone) {
+                    let mut tag = tagged
+                        .primary_tag_mut()
+                        .cloned()
+                        .unwrap_or_else(|| Tag::new(TagType::VorbisComments));
+                    tag.set_title(title.clone());
+                    tag.set_artist(artist.clone());
+                    tag.set_album(album.clone());
+                    tagged.insert_tag(tag);
+                    let _ = tagged.save_to_path(&temp_path_clone, WriteOptions::default());
                 }
 
-                tagged.insert_tag(tag);
-                tagged
-                    .save_to_path(&temp_path_clone, WriteOptions::default())
-                    .map_err(|e| format!("lofty save: {}", e))?;
-
-                // Structured path: artist/year/album/NN. title.flac
                 let year = track
                     .album
                     .as_ref()
-                    .and_then(|a| {
-                        a.release_date_original
-                            .as_ref()
-                            .and_then(|d| d.split('-').next().map(|s| s.to_string()))
-                            .or_else(|| {
-                                a.released_at.map(|ts| {
-                                    // rough year from unix timestamp
-                                    let year = 1970 + (ts / 31_536_000);
-                                    year.to_string()
-                                })
-                            })
-                    })
-                    .unwrap_or_else(|| "0000".to_string());
+                    .and_then(|a| a.release_date_original.as_ref())
+                    .and_then(|d| d.split('-').next())
+                    .unwrap_or("0000")
+                    .to_string();
                 let track_num = track.track_number.unwrap_or(0);
-                let safe_artist = sanitize(&artist);
-                let safe_album = sanitize(&album);
-                let safe_title = sanitize(&title);
-
-                let dir = output_dir.join(&safe_artist).join(&year).join(&safe_album);
-                std::fs::create_dir_all(&dir).ok();
-
-                let filename = format!("{:02}. {}.flac", track_num, safe_title);
+                let dir = output_dir
+                    .join(sanitize(&artist))
+                    .join(&year)
+                    .join(sanitize(&album));
+                let _ = std::fs::create_dir_all(&dir);
+                let filename = format!("{:02}. {}.flac", track_num, sanitize(&title));
                 let new_path = dir.join(filename);
-
-                std::fs::rename(&temp_path_clone, &new_path).ok();
+                let _ = std::fs::rename(&temp_path_clone, &new_path);
                 Ok::<_, String>(new_path)
             } else {
-                tracing::info!("get_track FAILED for {}", track_id);
                 Ok(temp_path_clone)
             }
         })
@@ -641,5 +689,44 @@ async fn library_ai_search(
         "query": query,
         "ai_reply": reply,
         "tracks": all_tracks
+    })))
+}
+
+async fn qobuz_album_id(
+    State(state): State<AppState>,
+    Query(params): Query<SearchParams>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let guard = state.qobuz.lock().await;
+    let source = guard.as_ref().ok_or((
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "Qobuz not authenticated".into(),
+    ))?;
+
+    let query = params.q.clone().unwrap_or_default();
+    if query.is_empty() {
+        return Err((axum::http::StatusCode::BAD_REQUEST, "Missing q".into()));
+    }
+
+    let service = source.service();
+    let query_clone = query.clone();
+
+    let album_id = tokio::task::spawn_blocking(move || {
+        let mut service = service.blocking_lock();
+        let result = service
+            .search_albums(&query_clone, Some(1), None)
+            .map_err(|e| e.to_string())?;
+        result
+            .items
+            .and_then(|items| items.into_iter().next())
+            .and_then(|album| album.id)
+            .ok_or_else(|| "No album found".to_string())
+    })
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (axum::http::StatusCode::NOT_FOUND, e))?;
+
+    Ok(Json(serde_json::json!({
+        "query": query,
+        "album_id": album_id
     })))
 }

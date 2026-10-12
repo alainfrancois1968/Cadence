@@ -47,3 +47,44 @@ Minimal skeleton with:
 - `qobuz-api` is unofficial. The API surface may evolve.
 - Streaming URLs are time-limited.
 - Downloads write tagged FLAC/MP3 files into a local folder that can later be scanned.
+
+
+curl "http://localhost:3000/qobuz/download?track_id=13176086&format_id=6"
+
+curl http://localhost:3000/library/scan
+
+sqlite3 ~/Projects/Cadence/cadence.db "SELECT id, title, artist, album, path FROM tracks;"
+
+curl "http://localhost:3000/library/search?q=blues"
+
+
+http://localhost:3000/library/stream?path=library/Miles%20Davis/1959/Kind%20Of%20Blue/04.%20All%20Blues.flac
+
+AQ.Ab8RN6J1dyIfPYHBP1tGd8rCmgeZcQ_FsHpEG48LN6YHB-nLTg
+
+https://aistudio.google.com/app/api-keys
+
+
+
+
+album id search
+curl "http://localhost:3000/qobuz/album-id?q=kind+of+blue"
+
+id:5099749522428
+
+curl "http://localhost:3000/qobuz/download?album_id=5099749522428&format_id=6"
+
+
+curl "http://localhost:3000/qobuz/search?q=A%20Night%20of%20Miles%20Davis&limit=5"
+
+
+curl "http://localhost:3000/qobuz/album-id?q=A%20Night%20of%20Miles%20Davis"
+id:dvre8bsckjwmm
+
+curl "http://localhost:3000/qobuz/download?album_id=dvre8bsckjwmm&format_id=6"
+
+
+curl "http://localhost:3000/qobuz/album-id?q=equinox"
+id:oewcjd3wc0ksa
+
+curl "http://localhost:3000/qobuz/download?album_id=oewcjd3wc0ksa&format_id=6"
