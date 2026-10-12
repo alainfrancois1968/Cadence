@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Cadence Music Server – API Endpoints</title>
+    <style>
+        body {
+            font-family: system-ui, sans-serif;
+            margin: 2rem;
+            background: #fafafa;
+        }
+
+        h1 {
+            color: #222;
+        }
+
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            background: white;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, .1);
+        }
+
+        th,
+        td {
+            border: 1px solid #ddd;
+            padding: 0.6rem 0.8rem;
+            text-align: left;
+            vertical-align: top;
+        }
+
+        th {
+            background: #f0f0f0;
+            font-weight: 600;
+        }
+
+        tr:nth-child(even) {
+            background: #f9f9f9;
+        }
+
+        code {
+            background: #eee;
+            padding: 0.1rem 0.3rem;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Cadence Music Server – API Endpoints</h1>
+    <table>
+        <thead>
+            <tr>
+                <th>Route</th>
+                <th>Purpose</th>
+                <th>Files read</th>
+                <th>Files written</th>
+                <th>SQL read</th>
+                <th>SQL written</th>
+                <th>Notes</th>
+                <th>Example</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><code>GET /health</code></td>
+                <td>Health check</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>Returns "ok"</td>
+                <td><code>curl http://localhost:3000/health</code></td>
+            </tr>
+            <tr>
+                <td><code>GET /qobuz/status</code></td>
+                <td>Qobuz authentication status</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>Shows if the token is valid</td>
+                <td><code>curl http://localhost:3000/qobuz/status</code></td>
+            </tr>
+            <tr>
+                <td><code>GET /qobuz/search</code></td>
+                <td>Search Qobuz albums and tracks</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>Returns albums and tracks</td>
+                <td><code>curl "http://localhost:3000/qobuz/search?q=Miles%20Davis&limit=10"</code></td>
+            </tr>
+            <tr>
+                <td><code>GET /qobuz/stream</code></td>
+                <td>Get a temporary stream URL</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>URL expires after a short time</td>
+                <td><code>curl "http://localhost:3000/qobuz/stream?track_id=13176086&format_id=6"</code></td>
+            </tr>
+            <tr>
+                <td><code>GET /qobuz/download</code></td>
+                <td>Download a track or a full album</td>
+                <td>—</td>
+                <td>FLAC files and cover.jpg under library/Qobuz/…</td>
+                <td>—</td>
+                <td>Upserts rows in tracks</td>
+                <td>Uses ID-prefixed folders</td>
+                <td><code>curl "http://localhost:3000/qobuz/download?album_id=5099749522428&format_id=6"</code></td>
+            </tr>
+            <tr>
+                <td><code>GET /qobuz/album-id</code></td>
+                <td>Get the first album ID for a search</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>Helper for downloads</td>
+                <td><code>curl "http://localhost:3000/qobuz/album-id?q=kind+of+blue"</code></td>
+            </tr>
+            <tr>
+                <td><code>GET /qobuz/queue-albums</code></td>
+                <td>Queue albums for an artist ID</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>Inserts into album_queue</td>
+                <td>Uses get_release_list</td>
+                <td><code>curl "http://localhost:3000/qobuz/queue-albums?artist_id=6760&limit=50"</code></td>
+            </tr>
+            <tr>
+                <td><code>GET /qobuz/queue-artists</code></td>
+                <td>Queue artists matching a name</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>Inserts into artists</td>
+                <td>Search-based</td>
+                <td><code>curl "http://localhost:3000/qobuz/queue-artists?q=Miles%20Davis&limit=100"</code></td>
+            </tr>
+            <tr>
+                <td><code>GET /qobuz/queue-albums-from-artists</code></td>
+                <td>Queue albums for every artist in the artists table</td>
+                <td>—</td>
+                <td>—</td>
+                <td>Reads artists</td>
+                <td>Inserts into album_queue</td>
+                <td>Skips artists that already have albums queued</td>
+                <td><code>curl "http://localhost:3000/qobuz/queue-albums-from-artists?limit=20"</code></td>
+            </tr>
+            <tr>
+                <td><code>GET /qobuz/download-artist-albums</code></td>
+                <td>List album IDs for an artist</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>Does not download files</td>
+                <td><code>curl "http://localhost:3000/qobuz/download-artist-albums?artist_id=6760&limit=10"</code></td>
+            </tr>
+            <tr>
+                <td><code>GET /library/search</code></td>
+                <td>Fuzzy search the local library</td>
+                <td>—</td>
+                <td>—</td>
+                <td>Reads tracks</td>
+                <td>—</td>
+                <td>Handles typos</td>
+                <td><code>curl "http://localhost:3000/library/search?q=miles%20davids"</code></td>
+            </tr>
+            <tr>
+                <td><code>GET /library/scan</code></td>
+                <td>Synchronize the library folder with SQLite</td>
+                <td>Reads files under library/</td>
+                <td>—</td>
+                <td>Reads existing paths from tracks</td>
+                <td>Upserts and deletes rows in tracks</td>
+                <td>Preserves existing artist_id values</td>
+                <td><code>curl http://localhost:3000/library/scan</code></td>
+            </tr>
+            <tr>
+                <td><code>GET /library/stream</code></td>
+                <td>Stream a local file</td>
+                <td>Reads the requested file</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>Loads the whole file into memory</td>
+                <td><code>curl "http://localhost:3000/library/stream?path=library/Qobuz/…"</code></td>
+            </tr>
+            <tr>
+                <td><code>GET /library/ai-search</code></td>
+                <td>LLM-powered semantic search</td>
+                <td>—</td>
+                <td>—</td>
+                <td>Reads artist names from tracks</td>
+                <td>—</td>
+                <td>Uses Gemini</td>
+                <td><code>curl "http://localhost:3000/library/ai-search?q=jazz%20legends"</code></td>
+            </tr>
+        </tbody>
+    </table>
+</body>
+
+</html>
