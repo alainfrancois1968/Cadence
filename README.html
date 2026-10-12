@@ -110,8 +110,8 @@
                 <td>—</td>
                 <td>FLAC files and cover.jpg under library/Qobuz/…</td>
                 <td>—</td>
-                <td>Upserts rows in tracks (including stream_url)</td>
-                <td>Uses ID-prefixed folders</td>
+                <td>Upserts rows in tracks (including stream_url and genre)</td>
+                <td>Uses ID-prefixed folders; genre comes from tags on scan</td>
                 <td><code>curl "http://localhost:3000/qobuz/download?album_id=5099749522428&format_id=6"</code></td>
             </tr>
             <tr>
@@ -169,10 +169,10 @@
                 <td>Fuzzy search the local library</td>
                 <td>—</td>
                 <td>—</td>
-                <td>Reads tracks</td>
+                <td>Reads tracks (includes genre)</td>
                 <td>—</td>
-                <td>Handles typos</td>
-                <td><code>curl "http://localhost:3000/library/search?q=miles%20davids"</code></td>
+                <td>Handles typos; searches title, artist, album, genre</td>
+                <td><code>curl "http://localhost:3000/library/search?q=jazz"</code></td>
             </tr>
             <tr>
                 <td><code>GET /library/scan</code></td>
@@ -180,8 +180,8 @@
                 <td>Reads files under library/</td>
                 <td>—</td>
                 <td>Reads existing paths from tracks</td>
-                <td>Upserts and deletes rows in tracks (writes stream_url)</td>
-                <td>Preserves existing artist_id values</td>
+                <td>Upserts tracks (genre from tags); rebuilds genres and track_genres tables</td>
+                <td>Preserves existing artist_id values; unique genres and track–genre links are rebuilt</td>
                 <td><code>curl http://localhost:3000/library/scan</code></td>
             </tr>
             <tr>
@@ -216,6 +216,15 @@
             </tr>
         </tbody>
     </table>
+    <h2>Database Tables</h2>
+    <ul>
+        <li><strong>tracks</strong> – path, title, artist, artist_id, album, track_number, duration, format, stream_url,
+            genre</li>
+        <li><strong>genres</strong> – unique genre names</li>
+        <li><strong>track_genres</strong> – many-to-many link between tracks and genres</li>
+        <li><strong>artists</strong> – artist_id, name</li>
+        <li><strong>album_queue</strong> – album_id, artist, artist_id, title</li>
+    </ul>
 </body>
 
 </html>
