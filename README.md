@@ -49,6 +49,11 @@ Minimal skeleton with:
 - Downloads write tagged FLAC/MP3 files into a local folder that can later be scanned.
 
 
+lsof -ti :3000 | xargs kill -9                                                                                                                                                                                                                                                                                                                              
+cargo run
+
+
+
 curl "http://localhost:3000/qobuz/download?track_id=13176086&format_id=6"
 
 curl http://localhost:3000/library/scan

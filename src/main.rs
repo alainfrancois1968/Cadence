@@ -332,6 +332,58 @@ async fn qobuz_download(
             let mut saved = Vec::new();
 
             if let Some(track_ids) = album.track_ids {
+                // Create album directory once
+                let artist = album
+                    .artist
+                    .as_ref()
+                    .and_then(|a| a.name.clone())
+                    .unwrap_or_else(|| "Unknown Artist".into());
+                let album_title = album
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| "Unknown Album".into());
+                let artist_id = album.artist.as_ref().and_then(|a| a.id);
+                let year = album
+                    .release_date_original
+                    .as_ref()
+                    .and_then(|d| d.split('-').next())
+                    .unwrap_or("0000")
+                    .to_string();
+
+                let artist_folder = format!("{} - {}", artist_id.unwrap_or(0), sanitize(&artist));
+                let album_folder = format!("{} - {}", album_id_clone, sanitize(&album_title));
+                let dir = output_dir_clone
+                    .join(&artist_folder)
+                    .join(&year)
+                    .join(&album_folder);
+                let _ = std::fs::create_dir_all(&dir);
+
+                tracing::info!("Album image field: {:?}", album.image);
+
+                // Download album cover art
+                if let Some(image) = &album.image {
+                    if let Some(cover_url) = image.large.as_ref().or(image.small.as_ref()) {
+                        tracing::info!("Downloading cover from: {}", cover_url);
+                        match reqwest::blocking::get(cover_url) {
+                            Ok(resp) => {
+                                tracing::info!("Cover HTTP status: {}", resp.status());
+                                if let Ok(bytes) = resp.bytes() {
+                                    let cover_path = dir.join("cover.jpg");
+                                    match std::fs::write(&cover_path, &bytes) {
+                                        Ok(_) => tracing::info!("Cover saved to {:?}", cover_path),
+                                        Err(e) => tracing::error!("Failed to write cover: {}", e),
+                                    }
+                                }
+                            }
+                            Err(e) => tracing::error!("Cover download failed: {}", e),
+                        }
+                    } else {
+                        tracing::warn!("No large/small cover URL");
+                    }
+                } else {
+                    tracing::warn!("No image field on album");
+                }
+
                 for (idx, track_id) in track_ids.into_iter().enumerate() {
                     let track = service
                         .get_track(track_id)
@@ -348,21 +400,12 @@ async fn qobuz_download(
                     std::fs::write(&temp_path, &bytes).map_err(|e| e.to_string())?;
 
                     let title = track.title.unwrap_or_else(|| format!("Track {}", track_id));
-                    let artist = album
-                        .artist
+                    let track_artist = track
+                        .performer
                         .as_ref()
-                        .and_then(|a| a.name.clone())
-                        .or_else(|| track.performer.as_ref().and_then(|p| p.name.clone()))
-                        .unwrap_or_else(|| "Unknown Artist".into());
-                    let album_title = album
-                        .title
-                        .clone()
-                        .unwrap_or_else(|| "Unknown Album".into());
-                    let artist_id = album
-                        .artist
-                        .as_ref()
-                        .and_then(|a| a.id)
-                        .or_else(|| track.performer.as_ref().and_then(|p| p.id));
+                        .and_then(|p| p.name.clone())
+                        .unwrap_or_else(|| artist.clone());
+                    let track_artist_id = track.performer.as_ref().and_then(|p| p.id).or(artist_id);
 
                     if let Ok(mut tagged) = lofty::read_from_path(&temp_path) {
                         let mut tag = tagged
@@ -370,29 +413,13 @@ async fn qobuz_download(
                             .cloned()
                             .unwrap_or_else(|| Tag::new(TagType::VorbisComments));
                         tag.set_title(title.clone());
-                        tag.set_artist(artist.clone());
+                        tag.set_artist(track_artist.clone());
                         tag.set_album(album_title.clone());
                         tagged.insert_tag(tag);
                         let _ = tagged.save_to_path(&temp_path, WriteOptions::default());
                     }
 
-                    let year = album
-                        .release_date_original
-                        .as_ref()
-                        .and_then(|d| d.split('-').next())
-                        .unwrap_or("0000")
-                        .to_string();
                     let track_num = track.track_number.unwrap_or((idx + 1) as i32);
-
-                    let artist_folder =
-                        format!("{} - {}", artist_id.unwrap_or(0), sanitize(&artist));
-                    let album_folder = format!("{} - {}", album_id_clone, sanitize(&album_title));
-                    let dir = output_dir_clone
-                        .join(&artist_folder)
-                        .join(&year)
-                        .join(&album_folder);
-                    let _ = std::fs::create_dir_all(&dir);
-
                     let filename =
                         format!("{:02}. {} - {}.flac", track_num, track_id, sanitize(&title));
                     let final_path = dir.join(filename);
@@ -402,8 +429,8 @@ async fn qobuz_download(
                     rt.block_on(index_downloaded_track(
                         final_path.to_str().unwrap_or(""),
                         &title,
-                        &artist,
-                        artist_id,
+                        &track_artist,
+                        track_artist_id,
                         &album_title,
                         Some(track_num),
                         None,
