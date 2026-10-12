@@ -60,6 +60,12 @@ struct LibraryStreamParams {
     path: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct ArtistQueueParams {
+    artist_id: i32,
+    limit: Option<i32>,
+}
+
 fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
@@ -659,13 +665,9 @@ async fn qobuz_album_id(
 
 async fn qobuz_queue_albums(
     State(state): State<AppState>,
-    Query(params): Query<SearchParams>,
+    Query(params): Query<ArtistQueueParams>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let query = params.q.unwrap_or_default();
-    if query.is_empty() {
-        return Err((axum::http::StatusCode::BAD_REQUEST, "Missing q".into()));
-    }
-
+    let artist_id = params.artist_id;
     let limit = params.limit.unwrap_or(50);
 
     let guard = state.qobuz.lock().await;
@@ -679,12 +681,11 @@ async fn qobuz_queue_albums(
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let service = source.service();
-    let query_clone = query.clone();
 
     let albums = tokio::task::spawn_blocking(move || {
         let mut service = service.blocking_lock();
         let result = service
-            .search_albums(&query_clone, Some(limit), None)
+            .get_release_list(artist_id, Some(limit), None)
             .map_err(|e| e.to_string())?;
         Ok::<_, String>(result.items.unwrap_or_default())
     })
@@ -696,7 +697,6 @@ async fn qobuz_queue_albums(
     for album in albums {
         if let Some(album_id) = album.id {
             let title = album.title.unwrap_or_default();
-            let artist_id = album.artist.as_ref().and_then(|a| a.id);
             let artist = album
                 .artist
                 .as_ref()
@@ -718,7 +718,7 @@ async fn qobuz_queue_albums(
     }
 
     Ok(Json(serde_json::json!({
-        "artist_query": query,
+        "artist_id": artist_id,
         "limit": limit,
         "queued": queued
     })))
