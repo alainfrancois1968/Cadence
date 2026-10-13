@@ -47,11 +47,19 @@
             border-radius: 3px;
             font-size: 0.9em;
         }
+
+        .note {
+            background: #fff8e1;
+            border-left: 4px solid #ffc107;
+            padding: 0.8rem 1rem;
+            margin: 1rem 0;
+        }
     </style>
 </head>
 
 <body>
     <h1>Cadence Music Server – API Endpoints</h1>
+    <p>Updated October 2026. Includes gapless and upsampled streaming endpoints.</p>
 
     <h2>Health & Qobuz</h2>
     <table>
@@ -255,8 +263,32 @@
                 <td>Downloads missing tracks</td>
                 <td>Looks up track path</td>
                 <td>Upserts on download</td>
-                <td>Clears the queue if the album changes; sets current track</td>
+                <td>Clears the queue if the album changes; sets current track. Streams a single track via stream_local.
+                </td>
                 <td><code>curl -I "http://localhost:3000/stream_from_track?track_id=13176086"</code></td>
+            </tr>
+            <tr>
+                <td><code>GET /stream_from_track_gapless</code></td>
+                <td>Stream the remainder of the album as one continuous response</td>
+                <td>All remaining track files</td>
+                <td>—</td>
+                <td>Looks up paths</td>
+                <td>Upserts on download</td>
+                <td>Concatenates raw FLAC bytes from the requested track to the end of the album. First request can be
+                    large.</td>
+                <td><code>curl -I "http://localhost:3000/stream_from_track_gapless?track_id=13176086"</code></td>
+            </tr>
+            <tr>
+                <td><code>GET /stream_from_track_upsampled</code></td>
+                <td>Upsample the remainder of the album and stream a single FLAC</td>
+                <td>All remaining track files</td>
+                <td>Writes <code>cache/upsampled/{album_id}_{track_id}_{rate}.flac</code></td>
+                <td>Looks up paths</td>
+                <td>Upserts on download</td>
+                <td>Decodes with symphonia, upsamples with rubato (FFT), re-encodes to 16-bit FLAC with flacenc. Caches
+                    the result. First request is CPU-heavy; subsequent requests are instant.</td>
+                <td><code>curl -I "http://localhost:3000/stream_from_track_upsampled?track_id=13176086&target_rate=96000"</code>
+                </td>
             </tr>
             <tr>
                 <td><code>GET /queue</code></td>
@@ -321,6 +353,14 @@
         </tbody>
     </table>
 
+    <div class="note">
+        <strong>Upsampling notes</strong><br>
+        The first call to <code>/stream_from_track_upsampled</code> for a given album + start track + target rate is
+        slow because it decodes, resamples (FFT), and re-encodes the entire remaining album before returning any audio.
+        The result is written to <code>cache/upsampled/</code>. Subsequent requests for the same combination serve the
+        cached file immediately. Default target rate is 96 kHz. Lower rates (48000) are faster for testing.
+    </div>
+
     <h2>Database Tables</h2>
     <ul>
         <li><strong>tracks</strong> – path, title, artist, artist_id, album, album_id, track_id, track_number, duration,
@@ -340,6 +380,11 @@
     ...</code></pre>
     <p>Existing files are skipped. Tags and front-cover art are embedded with lofty. A dynamic-range score is computed
         and stored in the <code>tracks</code> table.</p>
+
+    <h2>Cache layout</h2>
+    <p>Upsampled streams are cached here:</p>
+    <pre><code>cache/upsampled/{album_id}_{track_id}_{target_rate}.flac</code></pre>
+    <p>These files can be deleted safely; they will be regenerated on the next request.</p>
 </body>
 
 </html>
