@@ -193,10 +193,16 @@ async fn qobuz_download(
 
     // Single track
     if let Some(track_id) = params.track_id {
-        let path =
-            download_track_to_library(source, track_id, format_id, state.library.clone(), None)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        let path = download_track_to_library(
+            source,
+            track_id,
+            format_id,
+            state.library.clone(),
+            None,
+            None,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
         return Ok(Json(serde_json::json!({
             "type": "track",
             "track_id": track_id,
@@ -219,15 +225,30 @@ async fn qobuz_download(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-        // Build album folder: library/Artist - Album
-        let album_title = album.title.as_deref().unwrap_or("Unknown Album");
+        // Build path: Qobuz/artist_id - artist name/release year/album_id - album name
+        let artist_id = album.artist.as_ref().and_then(|a| a.id).unwrap_or(0);
         let artist_name = album
             .artist
             .as_ref()
             .and_then(|a| a.name.as_deref())
             .unwrap_or("Unknown Artist");
-        let folder_name = format!("{} - {}", sanitize(artist_name), sanitize(album_title));
-        let album_dir = std::path::PathBuf::from("library").join(&folder_name);
+        let year = album
+            .released_at
+            .map(|ts| {
+                // released_at is a unix timestamp (seconds)
+                let dt = chrono::DateTime::from_timestamp(ts, 0);
+                dt.map(|d| d.format("%Y").to_string())
+                    .unwrap_or_else(|| "0000".to_string())
+            })
+            .unwrap_or_else(|| "0000".to_string());
+        let album_title = album.title.as_deref().unwrap_or("Unknown Album");
+
+        let album_dir = std::path::PathBuf::from("library")
+            .join("Qobuz")
+            .join(format!("{} - {}", artist_id, sanitize(artist_name)))
+            .join(&year)
+            .join(format!("{} - {}", album_id, sanitize(album_title)));
+
         tokio::fs::create_dir_all(&album_dir)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -260,9 +281,9 @@ async fn qobuz_download(
         let mut paths = Vec::new();
         let mut skipped = 0;
 
-        for tid in track_ids {
-            // Check DB + file on disk
-            if let Ok(Some(path)) = state.library.track_path(tid).await {
+        for (idx, tid) in track_ids.iter().enumerate() {
+            let sequence = idx + 1;
+            if let Ok(Some(path)) = state.library.track_path(*tid).await {
                 if std::path::Path::new(&path).exists() {
                     skipped += 1;
                     tracing::info!("Track {} already on disk, skipping", tid);
@@ -273,10 +294,11 @@ async fn qobuz_download(
 
             match download_track_to_library(
                 source,
-                tid,
+                *tid,
                 format_id,
                 state.library.clone(),
                 Some(album_dir.clone()),
+                Some(sequence),
             )
             .await
             {
@@ -306,6 +328,7 @@ async fn download_track_to_library(
     format_id: i32,
     library: Arc<Library>,
     album_dir: Option<std::path::PathBuf>,
+    sequence: Option<usize>,
 ) -> Result<String, String> {
     use lofty::config::WriteOptions;
     use lofty::file::{AudioFile, TaggedFileExt};
@@ -319,7 +342,6 @@ async fn download_track_to_library(
         .await
         .map_err(|e| e.to_string())?;
 
-    // 1. Get the streaming URL
     let file_url = tokio::task::spawn_blocking({
         let service = service.clone();
         move || {
@@ -337,7 +359,6 @@ async fn download_track_to_library(
         .url
         .ok_or_else(|| "No streaming URL returned".to_string())?;
 
-    // 2. Download the raw FLAC
     let client = reqwest::Client::new();
     let resp = client
         .get(&url)
@@ -358,11 +379,11 @@ async fn download_track_to_library(
         .await
         .map_err(|e| format!("write flac: {}", e))?;
 
-    // 3. Fetch metadata + cover, embed tags, rename
     let (final_path, title, artist, album, track_number, duration) = tokio::task::spawn_blocking({
         let service = service.clone();
         let temp_path = temp_path.clone();
         let output_dir = output_dir.clone();
+        let sequence = sequence;
         move || -> Result<(std::path::PathBuf, Option<String>, Option<String>, Option<String>, Option<i32>, Option<f64>), String> {
             let service = service.blocking_lock();
             let track = service
@@ -408,7 +429,6 @@ async fn download_track_to_library(
 
             let duration_val = track.duration.map(|d| d as f64);
 
-            // Cover art (embedded only; file cover is written by the album path)
             if let Some(image_url) = track
                 .album
                 .as_ref()
@@ -430,9 +450,9 @@ async fn download_track_to_library(
                 .save_to_path(&temp_path, WriteOptions::default())
                 .map_err(|e| format!("lofty save: {}", e))?;
 
-            let artist_str = artist_val.as_deref().unwrap_or("Unknown");
             let title_str = title_val.as_deref().unwrap_or("Unknown");
-            let safe_name = format!("{} - {}.flac", sanitize(artist_str), sanitize(title_str));
+            let seq = sequence.unwrap_or(0);
+            let safe_name = format!("{}.{} - {}.flac", seq, track_id, sanitize(title_str));
             let final_path = output_dir.join(safe_name);
 
             if final_path != temp_path {
@@ -446,7 +466,6 @@ async fn download_track_to_library(
     .map_err(|e| e.to_string())?
     .map_err(|e| e)?;
 
-    // 4. Index in the library
     library
         .upsert_track(
             final_path.to_string_lossy().as_ref(),
