@@ -226,7 +226,11 @@ async fn qobuz_download(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
         // Build path: Qobuz/artist_id - artist name/release year/album_id - album name
-        let artist_id = album.artist.as_ref().and_then(|a| a.id).unwrap_or(0);
+        let artist_id = album
+            .artist
+            .as_ref()
+            .and_then(|a| a.id)
+            .unwrap_or(0);
         let artist_name = album
             .artist
             .as_ref()
@@ -452,7 +456,8 @@ async fn download_track_to_library(
 
             let title_str = title_val.as_deref().unwrap_or("Unknown");
             let seq = sequence.unwrap_or(0);
-            let safe_name = format!("{}.{} - {}.flac", seq, track_id, sanitize(title_str));
+            let safe_name = format!("{:02}. {} - {}.flac", seq, track_id, sanitize(title_str));
+            
             let final_path = output_dir.join(safe_name);
 
             if final_path != temp_path {
