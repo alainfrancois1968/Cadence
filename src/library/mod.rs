@@ -265,4 +265,12 @@ impl Library {
                 .await?;
         Ok(row.map(|(p,)| p))
     }
+    pub async fn set_dr_score(&self, path: &str, score: f64) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE tracks SET dr_score = ? WHERE path = ?")
+            .bind(score)
+            .bind(path)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }
