@@ -672,17 +672,12 @@ async fn stream_local(
     let path = params
         .get("path")
         .ok_or((StatusCode::BAD_REQUEST, "missing path".into()))?;
-    let file_path = std::path::Path::new(path);
 
-    let mut file = tokio::fs::File::open(file_path)
+    // Load the entire file into memory
+    let bytes = tokio::fs::read(path)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
-
-    let metadata = file
-        .metadata()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let file_size = metadata.len();
+    let file_size = bytes.len() as u64;
 
     let mut status = StatusCode::OK;
     let mut start: u64 = 0;
@@ -706,18 +701,13 @@ async fn stream_local(
                     end = end.min(file_size.saturating_sub(1));
                     content_length = end - start + 1;
                     status = StatusCode::PARTIAL_CONTENT;
-
-                    file.seek(SeekFrom::Start(start))
-                        .await
-                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
                 }
             }
         }
     }
 
-    let limited = file.take(content_length);
-    let stream = tokio_util::io::ReaderStream::new(limited);
-    let body = Body::from_stream(stream);
+    // Slice the in-memory buffer
+    let slice = bytes[start as usize..=end as usize].to_vec();
 
     let mut builder = Response::builder()
         .status(status)
@@ -732,7 +722,7 @@ async fn stream_local(
         );
     }
 
-    Ok(builder.body(body).unwrap())
+    Ok(builder.body(Body::from(slice)).unwrap())
 }
 
 async fn stream_qobuz(
@@ -742,42 +732,45 @@ async fn stream_qobuz(
 ) -> Result<Response, (StatusCode, String)> {
     let format_id = params.format_id.unwrap_or(6);
 
-    // 1. Try to find an already-downloaded local file for this track_id
-    if let Ok(Some(path)) = state.library.find_path_by_track_id(params.track_id).await {
-        // Re-use the range-aware local streamer
-        let mut q = std::collections::HashMap::new();
-        q.insert("path".to_string(), path);
-        return stream_local(Query(q), headers).await;
-    }
+    // Ensure the track exists locally
+    let path = if let Ok(Some(p)) = state.library.track_path(params.track_id).await {
+        if std::path::Path::new(&p).exists() {
+            p
+        } else {
+            download_track_to_library(
+                state.qobuz.lock().await.as_ref().ok_or((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Qobuz not available".into(),
+                ))?,
+                params.track_id,
+                format_id,
+                state.library.clone(),
+                None,
+                None,
+            )
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        }
+    } else {
+        download_track_to_library(
+            state.qobuz.lock().await.as_ref().ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Qobuz not available".into(),
+            ))?,
+            params.track_id,
+            format_id,
+            state.library.clone(),
+            None,
+            None,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    };
 
-    // 2. Fall back to a live Qobuz stream URL (no seeking yet)
-    let q = state.qobuz.lock().await;
-    let source = q.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Qobuz not available".into(),
-    ))?;
-
-    let service = source.service();
-    let file_url = tokio::task::spawn_blocking(move || {
-        let mut service = service.blocking_lock();
-        service
-            .get_track_file_url(params.track_id, format_id)
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    let url = file_url
-        .url
-        .ok_or((StatusCode::NOT_FOUND, "No stream URL from Qobuz".into()))?;
-
-    // Simple redirect to the Qobuz CDN URL
-    Ok(Response::builder()
-        .status(StatusCode::FOUND)
-        .header(header::LOCATION, url)
-        .body(Body::empty())
-        .unwrap())
+    // Hand off to the in-memory range streamer
+    let mut q = std::collections::HashMap::new();
+    q.insert("path".to_string(), path);
+    stream_local(Query(q), headers).await
 }
 
 async fn library_ai_search(
