@@ -46,11 +46,30 @@ struct DownloadParams {
     format_id: Option<i32>,
 }
 
+/// Kill any previous process listening on port 3000 so a new run can bind.
+fn kill_previous_instance() {
+    if let Ok(output) = std::process::Command::new("lsof")
+        .args(["-ti", ":3000"])
+        .output()
+    {
+        let pids = String::from_utf8_lossy(&output.stdout);
+        for pid in pids.lines().map(str::trim).filter(|s| !s.is_empty()) {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", pid])
+                .status();
+            tracing::info!("Killed previous process on port 3000 (pid {})", pid);
+        }
+    }
+}
+
 #[tokio::main]
+
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+
+    kill_previous_instance();
 
     dotenvy::dotenv().ok();
 
@@ -241,16 +260,10 @@ async fn qobuz_download(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-        let dr_score = dr_score::score_and_log(std::path::Path::new(&path), track_id);
-        if let Some(score) = dr_score {
-            state.library.set_dr_score(&path, score).await.ok();
-        }
-
         return Ok(Json(serde_json::json!({
             "type": "track",
             "track_id": track_id,
             "path": path,
-            "dr_score": dr_score,
             "status": "ok"
         })));
     }
@@ -342,10 +355,6 @@ async fn qobuz_download(
             .await
             {
                 Ok(p) => {
-                    let dr_score = dr_score::score_and_log(std::path::Path::new(&p), *tid);
-                    if let Some(score) = dr_score {
-                        state.library.set_dr_score(&p, score).await.ok();
-                    }
                     paths.push(p);
                 }
                 Err(e) => tracing::warn!("Failed to download track {}: {}", tid, e),

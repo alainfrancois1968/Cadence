@@ -11,7 +11,8 @@
             background: #fafafa;
         }
 
-        h1, h2 {
+        h1,
+        h2 {
             color: #222;
         }
 
@@ -109,13 +110,17 @@
             </tr>
             <tr>
                 <td><code>GET /qobuz/download</code></td>
-                <td>Download a track or a full album</td>
+                <td>Download a single track or a full album</td>
                 <td>—</td>
-                <td>FLAC files and cover.jpg under<br><code>library/Qobuz/artist_id - artist name/year/album_id - album name/</code></td>
+                <td>FLAC files + cover.jpg
+                    under<br><code>library/Qobuz/{artist_id} - {artist}/{year}/{album_id} - {album}/</code></td>
                 <td>Checks existing track paths</td>
-                <td>Upserts rows in tracks</td>
-                <td>Skips tracks already on disk; embeds tags and cover with lofty</td>
-                <td><code>curl "http://localhost:3000/qobuz/download?album_id=5099749522428&format_id=6"</code></td>
+                <td>Upserts rows in tracks; stores DR score</td>
+                <td>Album mode uses <code>get_album(..., "track_ids")</code>. Skips tracks already on disk. Embeds tags
+                    + cover with lofty. Computes and stores dynamic-range score.</td>
+                <td>Track:
+                    <code>curl "http://localhost:3000/qobuz/download?track_id=13176086&format_id=6"</code><br>Album:
+                    <code>curl "http://localhost:3000/qobuz/download?album_id=5099749522428&format_id=6"</code></td>
             </tr>
             <tr>
                 <td><code>GET /qobuz/album-id</code></td>
@@ -318,12 +323,23 @@
 
     <h2>Database Tables</h2>
     <ul>
-        <li><strong>tracks</strong> – path, title, artist, artist_id, album, album_id, track_id, track_number, duration, format, stream_url, genre</li>
+        <li><strong>tracks</strong> – path, title, artist, artist_id, album, album_id, track_id, track_number, duration,
+            format, stream_url, genre, dr_score</li>
         <li><strong>genres</strong> – unique genre names</li>
         <li><strong>track_genres</strong> – many-to-many link between tracks and genres</li>
         <li><strong>artists</strong> – artist_id, name</li>
         <li><strong>album_queue</strong> – album_id, artist, artist_id, title (download queue, not playback)</li>
     </ul>
+
+    <h2>Download layout</h2>
+    <p>Album downloads create this structure under <code>library/</code>:</p>
+    <pre><code>library/Qobuz/{artist_id} - {artist name}/{year}/{album_id} - {album title}/
+    cover.jpg
+    01. {track_id} - {title}.flac
+    02. {track_id} - {title}.flac
+    ...</code></pre>
+    <p>Existing files are skipped. Tags and front-cover art are embedded with lofty. A dynamic-range score is computed
+        and stored in the <code>tracks</code> table.</p>
 </body>
 
 </html>

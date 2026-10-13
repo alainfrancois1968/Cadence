@@ -1,3 +1,4 @@
+use crate::dr_score;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::tag::Accessor;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
@@ -31,12 +32,18 @@ impl Library {
                 format TEXT,
                 stream_url TEXT,
                 genre TEXT,
+                dr_score REAL,
                 updated_at TEXT
             )
             "#,
         )
         .execute(&pool)
         .await?;
+
+        // Add column if the table already existed without it
+        let _ = sqlx::query("ALTER TABLE tracks ADD COLUMN dr_score REAL")
+            .execute(&pool)
+            .await;
 
         sqlx::query(
             r#"
@@ -104,38 +111,38 @@ impl Library {
         genre: Option<&str>,
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
-        r#"
-        INSERT INTO tracks (path, title, artist, artist_id, album, album_id, track_id, track_number, duration, format, stream_url, genre, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-        ON CONFLICT(path) DO UPDATE SET
-            title = excluded.title,
-            artist = excluded.artist,
-            artist_id = COALESCE(excluded.artist_id, tracks.artist_id),
-            album = excluded.album,
-            album_id = COALESCE(excluded.album_id, tracks.album_id),
-            track_id = COALESCE(excluded.track_id, tracks.track_id),
-            track_number = excluded.track_number,
-            duration = excluded.duration,
-            format = excluded.format,
-            stream_url = excluded.stream_url,
-            genre = excluded.genre,
-            updated_at = datetime('now')
-        "#,
-    )
-    .bind(path)
-    .bind(title)
-    .bind(artist)
-    .bind(artist_id)
-    .bind(album)
-    .bind(album_id)
-    .bind(track_id)
-    .bind(track_number)
-    .bind(duration)
-    .bind(format)
-    .bind(stream_url)
-    .bind(genre)
-    .execute(&self.pool)
-    .await?;
+            r#"
+            INSERT INTO tracks (path, title, artist, artist_id, album, album_id, track_id, track_number, duration, format, stream_url, genre, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(path) DO UPDATE SET
+                title = excluded.title,
+                artist = excluded.artist,
+                artist_id = COALESCE(excluded.artist_id, tracks.artist_id),
+                album = excluded.album,
+                album_id = COALESCE(excluded.album_id, tracks.album_id),
+                track_id = COALESCE(excluded.track_id, tracks.track_id),
+                track_number = excluded.track_number,
+                duration = excluded.duration,
+                format = excluded.format,
+                stream_url = excluded.stream_url,
+                genre = excluded.genre,
+                updated_at = datetime('now')
+            "#,
+        )
+        .bind(path)
+        .bind(title)
+        .bind(artist)
+        .bind(artist_id)
+        .bind(album)
+        .bind(album_id)
+        .bind(track_id)
+        .bind(track_number)
+        .bind(duration)
+        .bind(format)
+        .bind(stream_url)
+        .bind(genre)
+        .execute(&self.pool)
+        .await?;
 
         Ok(())
     }
@@ -144,7 +151,7 @@ impl Library {
         let like = format!("%{}%", query);
         let rows = sqlx::query(
             r#"
-            SELECT path, title, artist, album, track_number, duration, format, stream_url, genre, updated_at
+            SELECT path, title, artist, album, track_number, duration, format, stream_url, genre, dr_score, updated_at
             FROM tracks
             WHERE title LIKE ?1 OR artist LIKE ?1 OR album LIKE ?1 OR genre LIKE ?1
             ORDER BY artist, album, track_number
@@ -167,6 +174,7 @@ impl Library {
                     "format": r.try_get::<String, _>("format").ok(),
                     "stream_url": r.try_get::<String, _>("stream_url").ok(),
                     "genre": r.try_get::<String, _>("genre").ok(),
+                    "dr_score": r.try_get::<f64, _>("dr_score").ok(),
                     "updated_at": r.try_get::<String, _>("updated_at").ok(),
                 })
             })
@@ -232,9 +240,23 @@ impl Library {
             )
             .await?;
 
+            // Dynamic range – computed on scan only
+            if let Some(score) = dr_score::score_and_log(path, 0) {
+                self.set_dr_score(&path_str, score).await.ok();
+            }
+
             count += 1;
         }
         Ok(count)
+    }
+
+    pub async fn set_dr_score(&self, path: &str, score: f64) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE tracks SET dr_score = ? WHERE path = ?")
+            .bind(score)
+            .bind(path)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn find_path_by_track_id(
@@ -264,13 +286,5 @@ impl Library {
                 .fetch_optional(&self.pool)
                 .await?;
         Ok(row.map(|(p,)| p))
-    }
-    pub async fn set_dr_score(&self, path: &str, score: f64) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE tracks SET dr_score = ? WHERE path = ?")
-            .bind(score)
-            .bind(path)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
     }
 }

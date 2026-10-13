@@ -94,6 +94,16 @@
                 <td>Album title</td>
             </tr>
             <tr>
+                <td><code>album_id</code></td>
+                <td>TEXT</td>
+                <td>Qobuz album ID (when known)</td>
+            </tr>
+            <tr>
+                <td><code>track_id</code></td>
+                <td>INTEGER</td>
+                <td>Qobuz track ID (used for skip-existing and streaming)</td>
+            </tr>
+            <tr>
                 <td><code>track_number</code></td>
                 <td>INTEGER</td>
                 <td>Track number on the album</td>
@@ -117,6 +127,11 @@
                 <td><code>genre</code></td>
                 <td>TEXT</td>
                 <td>Genre name (from album tags or Qobuz album)</td>
+            </tr>
+            <tr>
+                <td><code>dr_score</code></td>
+                <td>REAL</td>
+                <td>Dynamic-range score computed after download</td>
             </tr>
             <tr>
                 <td><code>updated_at</code></td>
