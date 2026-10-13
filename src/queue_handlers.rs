@@ -8,8 +8,9 @@
 //! opens /queue/next_stream. This keeps Range/seeking working.
 
 use axum::{
+    body::Body,
     extract::{Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::Response,
     Json,
 };
@@ -19,10 +20,6 @@ use std::sync::Arc;
 use crate::library::Library;
 use crate::qobuz::QobuzSource;
 use crate::queue::{PlayQueue, QueueTrack};
-
-use axum::body::Body;
-use axum::http::{header, StatusCode};
-use axum::response::Response;
 
 /// Minimal state the handlers need. Your AppState already has qobuz + library;
 /// add `queue: Arc<tokio::sync::Mutex<PlayQueue>>`.

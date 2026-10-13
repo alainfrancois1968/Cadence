@@ -1,24 +1,79 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <title>Cadence Queue Test</title>
     <style>
-        body { font-family: system-ui, sans-serif; margin: 2rem; background: #fafafa; }
-        h1 { color: #222; }
-        input[type="text"] { width: 60%; padding: 0.4rem; }
-        button { margin: 0.3rem; padding: 0.4rem 0.8rem; }
-        audio { width: 100%; margin: 1rem 0; }
-        pre { background: #fff; padding: 1rem; border: 1px solid #ddd; overflow-x: auto; }
-        .status { color: #555; margin: 0.5rem 0; }
+        body {
+            font-family: system-ui, sans-serif;
+            margin: 2rem;
+            background: #fafafa;
+        }
+
+        h1 {
+            color: #222;
+        }
+
+        input[type="text"] {
+            width: 70%;
+            padding: 0.4rem;
+            margin: 0.2rem 0;
+        }
+
+        button {
+            margin: 0.3rem;
+            padding: 0.4rem 0.8rem;
+        }
+
+        audio {
+            width: 100%;
+            margin: 1rem 0;
+        }
+
+        pre {
+            background: #fff;
+            padding: 1rem;
+            border: 1px solid #ddd;
+            overflow-x: auto;
+        }
+
+        .status {
+            color: #555;
+            margin: 0.5rem 0;
+        }
+
+        .mode {
+            margin: 0.5rem 0;
+        }
+
+        label {
+            display: block;
+            margin-top: 0.4rem;
+        }
     </style>
 </head>
+
 <body>
     <h1>Cadence Queue Test</h1>
 
+    <div class="mode">
+        <label>
+            <input type="radio" name="mode" value="normal" checked> Normal stream
+        </label>
+        <label>
+            <input type="radio" name="mode" value="gapless"> Gapless stream
+        </label>
+    </div>
+
     <p>
-        <label>Stream URL or track_id:<br>
-            <input type="text" id="url" placeholder="http://localhost:3000/stream_from_track?track_id=13176086" size="80">
+        <label>Normal stream URL or track_id:<br>
+            <input type="text" id="url" placeholder="http://localhost:3000/stream_from_track?track_id=13176086"
+                size="80">
+        </label>
+        <label>Gapless stream URL or track_id:<br>
+            <input type="text" id="url-gapless"
+                placeholder="http://localhost:3000/stream_from_track_gapless?track_id=13176086" size="80">
         </label>
         <button onclick="play()">Play</button>
     </p>
@@ -46,16 +101,25 @@
             status.textContent = msg;
         }
 
+        function currentMode() {
+            return document.querySelector('input[name="mode"]:checked').value;
+        }
+
         async function play() {
-            let url = document.getElementById("url").value.trim();
+            const mode = currentMode();
+            const inputId = mode === "gapless" ? "url-gapless" : "url";
+            let url = document.getElementById(inputId).value.trim();
             if (!url) return;
+
             // Allow pasting just a track_id
             if (/^\d+$/.test(url)) {
-                url = SERVER + `/stream_from_track?track_id=${url}`;
+                const endpoint = mode === "gapless" ? "/stream_from_track_gapless" : "/stream_from_track";
+                url = SERVER + `${endpoint}?track_id=${url}`;
             }
+
             player.src = url;
             player.play().catch(e => setStatus("Play error: " + e.message));
-            setStatus("Playing: " + url);
+            setStatus(`Playing (${mode}): ${url}`);
             setTimeout(refresh, 500);
         }
 
@@ -102,4 +166,5 @@
         setInterval(refresh, 3000);
     </script>
 </body>
+
 </html>
