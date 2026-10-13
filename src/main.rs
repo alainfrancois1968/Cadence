@@ -145,32 +145,61 @@ struct StreamParams {
 async fn qobuz_stream(
     State(state): State<AppState>,
     Query(params): Query<StreamParams>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Response, (StatusCode, String)> {
+    let track_id = params.track_id;
+    let format_id = params.format_id.unwrap_or(6);
+
     let q = state.qobuz.lock().await;
     let source = q.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Qobuz not available".into(),
     ))?;
-    let format_id = params.format_id.unwrap_or(6);
-
     let service = source.service();
+
+    // Get the temporary URL
     let file_url = tokio::task::spawn_blocking(move || {
         let mut service = service.blocking_lock();
         service
-            .get_track_file_url(params.track_id, format_id)
+            .get_track_file_url(track_id, format_id)
             .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    Ok(Json(serde_json::json!({
-        "track_id": params.track_id,
-        "format_id": format_id,
-        "duration": file_url.duration,
-        "mime_type": file_url.mime_type,
-        "url": file_url.url
-    })))
+    let url = file_url
+        .url
+        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "No URL returned".into()))?;
+
+    // Proxy the audio stream
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("upstream: {}", e)))?;
+
+    if !resp.status().is_success() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("upstream status {}", resp.status()),
+        ));
+    }
+
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("audio/flac")
+        .to_string();
+
+    let stream = resp.bytes_stream();
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", content_type)
+        .body(Body::from_stream(stream))
+        .unwrap())
 }
 
 #[derive(Deserialize)]

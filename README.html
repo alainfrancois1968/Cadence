@@ -108,10 +108,12 @@
                 <td><code>GET /qobuz/download</code></td>
                 <td>Download a track or a full album</td>
                 <td>—</td>
-                <td>FLAC files and cover.jpg under library/Qobuz/…</td>
-                <td>—</td>
+                <td>FLAC files and cover.jpg
+                    under<br><code>library/Qobuz/artist_id - artist name/year/album_id - album name/01. track_id - track name.flac</code>
+                </td>
+                <td>Checks existing track paths</td>
                 <td>Upserts rows in tracks (including stream_url and genre)</td>
-                <td>Uses ID-prefixed folders; genre comes from tags on scan</td>
+                <td>Skips tracks already on disk; embeds tags and cover with lofty; zero-padded track sequence</td>
                 <td><code>curl "http://localhost:3000/qobuz/download?album_id=5099749522428&format_id=6"</code></td>
             </tr>
             <tr>
