@@ -240,9 +240,11 @@ impl Library {
             )
             .await?;
 
-            // Dynamic range – computed on scan only
-            if let Some(score) = dr_score::score_and_log(path, 0) {
-                self.set_dr_score(&path_str, score).await.ok();
+            // Dynamic range – only if not already stored
+            if self.get_dr_score(&path_str).await.ok().flatten().is_none() {
+                if let Some(score) = dr_score::score_and_log(path, 0) {
+                    self.set_dr_score(&path_str, score).await.ok();
+                }
             }
 
             count += 1;
@@ -257,6 +259,16 @@ impl Library {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Returns the existing DR score for a path, if any.
+    pub async fn get_dr_score(&self, path: &str) -> Result<Option<f64>, sqlx::Error> {
+        let row: Option<(Option<f64>,)> =
+            sqlx::query_as("SELECT dr_score FROM tracks WHERE path = ?")
+                .bind(path)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.and_then(|(s,)| s))
     }
 
     pub async fn find_path_by_track_id(
