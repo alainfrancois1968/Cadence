@@ -145,61 +145,47 @@ struct StreamParams {
 async fn qobuz_stream(
     State(state): State<AppState>,
     Query(params): Query<StreamParams>,
+    headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
-    let track_id = params.track_id;
     let format_id = params.format_id.unwrap_or(6);
 
-    let q = state.qobuz.lock().await;
-    let source = q.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Qobuz not available".into(),
-    ))?;
-    let service = source.service();
-
-    // Get the temporary URL
-    let file_url = tokio::task::spawn_blocking(move || {
-        let mut service = service.blocking_lock();
-        service
-            .get_track_file_url(track_id, format_id)
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    let url = file_url
-        .url
-        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "No URL returned".into()))?;
-
-    // Proxy the audio stream
-    let client = reqwest::Client::new();
-    let resp = client
-        .get(&url)
-        .send()
+    let path = if let Ok(Some(p)) = state.library.track_path(params.track_id).await {
+        if std::path::Path::new(&p).exists() {
+            p
+        } else {
+            download_track_to_library(
+                state.qobuz.lock().await.as_ref().ok_or((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Qobuz not available".into(),
+                ))?,
+                params.track_id,
+                format_id,
+                state.library.clone(),
+                None,
+                None,
+            )
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        }
+    } else {
+        download_track_to_library(
+            state.qobuz.lock().await.as_ref().ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Qobuz not available".into(),
+            ))?,
+            params.track_id,
+            format_id,
+            state.library.clone(),
+            None,
+            None,
+        )
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("upstream: {}", e)))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    };
 
-    if !resp.status().is_success() {
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            format!("upstream status {}", resp.status()),
-        ));
-    }
-
-    let content_type = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("audio/flac")
-        .to_string();
-
-    let stream = resp.bytes_stream();
-
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", content_type)
-        .body(Body::from_stream(stream))
-        .unwrap())
+    let mut q = std::collections::HashMap::new();
+    q.insert("path".to_string(), path);
+    stream_local(Query(q), headers).await
 }
 
 #[derive(Deserialize)]
@@ -673,7 +659,6 @@ async fn stream_local(
         .get("path")
         .ok_or((StatusCode::BAD_REQUEST, "missing path".into()))?;
 
-    // Load the entire file into memory
     let bytes = tokio::fs::read(path)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
@@ -686,34 +671,49 @@ async fn stream_local(
 
     if let Some(range_header) = headers.get(header::RANGE) {
         if let Ok(range_str) = range_header.to_str() {
+            tracing::info!("Range request: {}", range_str);
             if let Some(range) = range_str.strip_prefix("bytes=") {
                 let parts: Vec<&str> = range.split('-').collect();
                 if parts.len() == 2 {
-                    if !parts[0].is_empty() {
-                        start = parts[0].parse().unwrap_or(0);
+                    if parts[0].is_empty() && !parts[1].is_empty() {
+                        let suffix: u64 = parts[1].parse().unwrap_or(0);
+                        start = file_size.saturating_sub(suffix);
+                    } else {
+                        if !parts[0].is_empty() {
+                            start = parts[0].parse().unwrap_or(0);
+                        }
+                        if !parts[1].is_empty() {
+                            end = parts[1].parse().unwrap_or(end);
+                        }
                     }
-                    if !parts[1].is_empty() {
-                        end = parts[1].parse().unwrap_or(end);
-                    }
-                    if start > end || start >= file_size {
+
+                    if start >= file_size {
                         return Err((StatusCode::RANGE_NOT_SATISFIABLE, "invalid range".into()));
                     }
                     end = end.min(file_size.saturating_sub(1));
+                    if start > end {
+                        return Err((StatusCode::RANGE_NOT_SATISFIABLE, "invalid range".into()));
+                    }
                     content_length = end - start + 1;
                     status = StatusCode::PARTIAL_CONTENT;
+                    tracing::info!("Serving range {}-{} / {}", start, end, file_size);
                 }
             }
         }
     }
 
-    // Slice the in-memory buffer
     let slice = bytes[start as usize..=end as usize].to_vec();
 
     let mut builder = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "audio/flac")
         .header(header::CONTENT_LENGTH, content_length)
-        .header(header::ACCEPT_RANGES, "bytes");
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(
+            "Access-Control-Expose-Headers",
+            "Content-Range, Accept-Ranges, Content-Length, Content-Type",
+        )
+        .header(header::CACHE_CONTROL, "no-cache");
 
     if status == StatusCode::PARTIAL_CONTENT {
         builder = builder.header(
