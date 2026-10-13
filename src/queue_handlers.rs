@@ -17,8 +17,12 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::library::Library;
-use crate::queue::{PlayQueue, QueueTrack};
 use crate::qobuz::QobuzSource;
+use crate::queue::{PlayQueue, QueueTrack};
+
+use axum::body::Body;
+use axum::http::{header, StatusCode};
+use axum::response::Response;
 
 /// Minimal state the handlers need. Your AppState already has qobuz + library;
 /// add `queue: Arc<tokio::sync::Mutex<PlayQueue>>`.
@@ -89,6 +93,79 @@ pub async fn stream_from_track(
     if let Some(nid) = next_id {
         h.insert("X-Next-Track-Id", nid.to_string().parse().unwrap());
     }
+    Ok(resp)
+}
+
+/// GET /stream_from_track_gapless?track_id=...&format_id=6
+///
+/// Loads all tracks from the requested one to the end of the album into memory,
+/// then streams them as one continuous response.
+pub async fn stream_from_track_gapless(
+    State(state): State<crate::AppState>,
+    Query(params): Query<StreamFromTrackParams>,
+) -> Result<Response, (StatusCode, String)> {
+    let format_id = params.format_id.unwrap_or(6);
+
+    let (album_id, tracks) = load_album_tracks(&state, params.track_id, format_id).await?;
+
+    let start_index = tracks
+        .iter()
+        .position(|t| t.track_id == params.track_id)
+        .unwrap_or(0);
+
+    {
+        let mut q = state.queue.lock().await;
+        if q.album_id.as_deref() != Some(album_id.as_str()) || q.tracks.is_empty() {
+            q.clear();
+            q.album_id = Some(album_id);
+            q.tracks = tracks.clone();
+        }
+        q.current = start_index;
+    }
+
+    let paths: Vec<String> = tracks[start_index..]
+        .iter()
+        .map(|t| t.path.clone())
+        .collect();
+
+    if paths.is_empty() {
+        return Err((StatusCode::NOT_FOUND, "no tracks to stream".into()));
+    }
+
+    // Load every remaining track fully into memory.
+    let mut all_bytes = Vec::new();
+    for path in &paths {
+        let bytes = tokio::fs::read(path).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("read {}: {}", path, e),
+            )
+        })?;
+        all_bytes.extend_from_slice(&bytes);
+    }
+
+    let body = Body::from(all_bytes);
+
+    let mut resp = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "audio/flac")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header("X-Gapless", "1")
+        .body(body)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let (idx, len, next_id) = {
+        let q = state.queue.lock().await;
+        let next = q.tracks.get(q.current + 1).map(|t| t.track_id);
+        (q.current, q.tracks.len(), next)
+    };
+    let h = resp.headers_mut();
+    h.insert("X-Queue-Index", idx.to_string().parse().unwrap());
+    h.insert("X-Queue-Length", len.to_string().parse().unwrap());
+    if let Some(nid) = next_id {
+        h.insert("X-Next-Track-Id", nid.to_string().parse().unwrap());
+    }
+
     Ok(resp)
 }
 

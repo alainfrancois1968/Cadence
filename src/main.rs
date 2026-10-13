@@ -32,6 +32,8 @@ use std::path::PathBuf;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
+
+
 #[derive(Clone)]
 struct AppState {
     qobuz: Arc<Mutex<Option<QobuzSource>>>,
@@ -104,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/qobuz/queue-albums", get(qobuz_queue_albums))
         .route("/qobuz/queue-artists", get(qobuz_queue_artists))
         .route("/stream_from_track", get(queue_handlers::stream_from_track))
+        .route("/stream_from_track_gapless", get(queue_handlers::stream_from_track_gapless))
         .route("/queue", get(queue_handlers::queue_status))
         .route("/queue/next", axum::routing::post(queue_handlers::queue_next))
         .route("/queue/previous", axum::routing::post(queue_handlers::queue_previous))
