@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/library/search", get(library_search))
         .route("/library/scan", get(library_scan))
         .route("/library/stream_local", get(stream_local))
-        .route("/library/stream_qobuz", get(stream_qobuz))
+    
         .route("/library/ai-search", get(library_ai_search))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -723,54 +723,6 @@ async fn stream_local(
     }
 
     Ok(builder.body(Body::from(slice)).unwrap())
-}
-
-async fn stream_qobuz(
-    State(state): State<AppState>,
-    Query(params): Query<StreamParams>,
-    headers: HeaderMap,
-) -> Result<Response, (StatusCode, String)> {
-    let format_id = params.format_id.unwrap_or(6);
-
-    // Ensure the track exists locally
-    let path = if let Ok(Some(p)) = state.library.track_path(params.track_id).await {
-        if std::path::Path::new(&p).exists() {
-            p
-        } else {
-            download_track_to_library(
-                state.qobuz.lock().await.as_ref().ok_or((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Qobuz not available".into(),
-                ))?,
-                params.track_id,
-                format_id,
-                state.library.clone(),
-                None,
-                None,
-            )
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
-        }
-    } else {
-        download_track_to_library(
-            state.qobuz.lock().await.as_ref().ok_or((
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Qobuz not available".into(),
-            ))?,
-            params.track_id,
-            format_id,
-            state.library.clone(),
-            None,
-            None,
-        )
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
-    };
-
-    // Hand off to the in-memory range streamer
-    let mut q = std::collections::HashMap::new();
-    q.insert("path".to_string(), path);
-    stream_local(Query(q), headers).await
 }
 
 async fn library_ai_search(
