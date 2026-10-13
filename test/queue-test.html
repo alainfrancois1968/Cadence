@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Cadence Queue Test</title>
+    <style>
+        body { font-family: system-ui, sans-serif; margin: 2rem; background: #fafafa; }
+        h1 { color: #222; }
+        input[type="text"] { width: 60%; padding: 0.4rem; }
+        button { margin: 0.3rem; padding: 0.4rem 0.8rem; }
+        audio { width: 100%; margin: 1rem 0; }
+        pre { background: #fff; padding: 1rem; border: 1px solid #ddd; overflow-x: auto; }
+        .status { color: #555; margin: 0.5rem 0; }
+    </style>
+</head>
+<body>
+    <h1>Cadence Queue Test</h1>
+
+    <p>
+        <label>Stream URL or track_id:<br>
+            <input type="text" id="url" placeholder="http://localhost:3000/stream_from_track?track_id=13176086" size="80">
+        </label>
+        <button onclick="play()">Play</button>
+    </p>
+
+    <audio id="player" controls></audio>
+    <div class="status" id="status">Ready</div>
+
+    <p>
+        <button onclick="prev()">Previous</button>
+        <button onclick="next()">Next</button>
+        <button onclick="refresh()">Refresh queue</button>
+        <button onclick="clearQueue()">Clear</button>
+    </p>
+
+    <h2>Queue</h2>
+    <pre id="queue">loading…</pre>
+
+    <script>
+        const SERVER = "http://localhost:3000";
+        const player = document.getElementById("player");
+        const status = document.getElementById("status");
+        const queueEl = document.getElementById("queue");
+
+        function setStatus(msg) {
+            status.textContent = msg;
+        }
+
+        async function play() {
+            let url = document.getElementById("url").value.trim();
+            if (!url) return;
+            // Allow pasting just a track_id
+            if (/^\d+$/.test(url)) {
+                url = SERVER + `/stream_from_track?track_id=${url}`;
+            }
+            player.src = url;
+            player.play().catch(e => setStatus("Play error: " + e.message));
+            setStatus("Playing: " + url);
+            setTimeout(refresh, 500);
+        }
+
+        async function next() {
+            player.src = SERVER + "/queue/next_stream";
+            player.play().catch(e => setStatus("Next error: " + e.message));
+            setStatus("Skipped to next");
+            setTimeout(refresh, 500);
+        }
+
+        async function prev() {
+            player.src = SERVER + "/queue/previous_stream";
+            player.play().catch(e => setStatus("Previous error: " + e.message));
+            setStatus("Skipped to previous");
+            setTimeout(refresh, 500);
+        }
+
+        async function clearQueue() {
+            await fetch(SERVER + "/queue/clear", { method: "POST" });
+            setStatus("Queue cleared");
+            refresh();
+        }
+
+        async function refresh() {
+            try {
+                const r = await fetch(SERVER + "/queue");
+                const data = await r.json();
+                queueEl.textContent = JSON.stringify(data, null, 2);
+            } catch (e) {
+                queueEl.textContent = "Error loading queue: " + e.message;
+            }
+        }
+
+        player.addEventListener("ended", () => {
+            setStatus("Track ended — loading next");
+            next();
+        });
+
+        player.addEventListener("error", () => {
+            setStatus("Player error");
+        });
+
+        refresh();
+        setInterval(refresh, 3000);
+    </script>
+</body>
+</html>

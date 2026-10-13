@@ -122,3 +122,8 @@ curl "http://localhost:3000/qobuz/download-artist-albums?artist_id=4900089&limit
 
 
 curl -I "http://localhost:3000/library/stream_local?path=library/Qobuz/6760%20-%20Miles%20Davis/1959/5099749522428%20-%20Kind%20Of%20Blue/04.%2013176086%20-%20All%20Blues.flac"
+
+
+
+
+
