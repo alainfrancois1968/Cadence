@@ -14,10 +14,10 @@ use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
 mod library;
-mod sources;
+mod qobuz;
 
 use library::Library;
-use sources::qobuz::QobuzSource;
+use qobuz::QobuzSource;
 
 #[derive(Clone)]
 struct AppState {
