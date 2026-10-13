@@ -15,14 +15,18 @@ use tracing::{info, warn};
 
 mod library;
 mod qobuz;
+mod queue;
+mod queue_handlers;
 
 use library::Library;
 use qobuz::QobuzSource;
+use queue::PlayQueue;
 
 #[derive(Clone)]
 struct AppState {
     qobuz: Arc<Mutex<Option<QobuzSource>>>,
     library: Arc<Library>,
+    queue: Arc<Mutex<PlayQueue>>,
 }
 
 #[tokio::main]
@@ -51,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         qobuz: qobuz.clone(),
         library: library.clone(),
+        queue: Arc::new(Mutex::new(PlayQueue::default())),
     };
 
     let app = Router::new()
@@ -62,6 +67,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/qobuz/album-id", get(qobuz_album_id))
         .route("/qobuz/queue-albums", get(qobuz_queue_albums))
         .route("/qobuz/queue-artists", get(qobuz_queue_artists))
+        .route("/stream_from_track", get(queue_handlers::stream_from_track))
+        .route("/queue", get(queue_handlers::queue_status))
+        .route("/queue/next", axum::routing::post(queue_handlers::queue_next))
+        .route("/queue/previous", axum::routing::post(queue_handlers::queue_previous))
+        .route("/queue/next_stream", get(queue_handlers::queue_next_stream))
+        .route("/queue/previous_stream", get(queue_handlers::queue_previous_stream))
+        .route("/queue/clear", axum::routing::post(queue_handlers::queue_clear))
         .route(
             "/qobuz/queue-albums-from-artists",
             get(qobuz_queue_albums_from_artists),
@@ -341,7 +353,7 @@ async fn qobuz_download(
     ))
 }
 
-async fn download_track_to_library(
+pub async fn download_track_to_library(
     source: &QobuzSource,
     track_id: i32,
     format_id: i32,
@@ -651,7 +663,7 @@ async fn library_scan(
 
 /// Full range-aware FLAC streaming.
 /// Supports `Range: bytes=start-end` and returns 206 Partial Content.
-async fn stream_local(
+pub async fn stream_local(
     Query(params): Query<std::collections::HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {

@@ -11,7 +11,7 @@
             background: #fafafa;
         }
 
-        h1 {
+        h1, h2 {
             color: #222;
         }
 
@@ -20,6 +20,7 @@
             width: 100%;
             background: white;
             box-shadow: 0 1px 3px rgba(0, 0, 0, .1);
+            margin-bottom: 2rem;
         }
 
         th,
@@ -50,6 +51,8 @@
 
 <body>
     <h1>Cadence Music Server – API Endpoints</h1>
+
+    <h2>Health & Qobuz</h2>
     <table>
         <thead>
             <tr>
@@ -96,24 +99,22 @@
             </tr>
             <tr>
                 <td><code>GET /qobuz/stream</code></td>
-                <td>Get a temporary Qobuz stream URL</td>
-                <td>—</td>
-                <td>—</td>
-                <td>—</td>
-                <td>—</td>
-                <td>URL expires after a short time</td>
+                <td>Stream a Qobuz track (download if missing)</td>
+                <td>Reads local file if present</td>
+                <td>Downloads FLAC if not cached</td>
+                <td>Looks up path in tracks</td>
+                <td>Upserts tracks on first download</td>
+                <td>Always streams from local storage; supports Range</td>
                 <td><code>curl "http://localhost:3000/qobuz/stream?track_id=13176086&format_id=6"</code></td>
             </tr>
             <tr>
                 <td><code>GET /qobuz/download</code></td>
                 <td>Download a track or a full album</td>
                 <td>—</td>
-                <td>FLAC files and cover.jpg
-                    under<br><code>library/Qobuz/artist_id - artist name/year/album_id - album name/01. track_id - track name.flac</code>
-                </td>
+                <td>FLAC files and cover.jpg under<br><code>library/Qobuz/artist_id - artist name/year/album_id - album name/</code></td>
                 <td>Checks existing track paths</td>
-                <td>Upserts rows in tracks (including stream_url and genre)</td>
-                <td>Skips tracks already on disk; embeds tags and cover with lofty; zero-padded track sequence</td>
+                <td>Upserts rows in tracks</td>
+                <td>Skips tracks already on disk; embeds tags and cover with lofty</td>
                 <td><code>curl "http://localhost:3000/qobuz/download?album_id=5099749522428&format_id=6"</code></td>
             </tr>
             <tr>
@@ -128,12 +129,12 @@
             </tr>
             <tr>
                 <td><code>GET /qobuz/queue-albums</code></td>
-                <td>Queue albums for an artist ID</td>
+                <td>Queue albums for an artist ID (download queue)</td>
                 <td>—</td>
                 <td>—</td>
                 <td>—</td>
                 <td>Inserts into album_queue</td>
-                <td>Uses get_release_list</td>
+                <td>Stub – intended for bulk download</td>
                 <td><code>curl "http://localhost:3000/qobuz/queue-albums?artist_id=6760&limit=50"</code></td>
             </tr>
             <tr>
@@ -143,7 +144,7 @@
                 <td>—</td>
                 <td>—</td>
                 <td>Inserts into artists</td>
-                <td>Search-based</td>
+                <td>Stub</td>
                 <td><code>curl "http://localhost:3000/qobuz/queue-artists?q=Miles%20Davis&limit=100"</code></td>
             </tr>
             <tr>
@@ -153,8 +154,8 @@
                 <td>—</td>
                 <td>Reads artists</td>
                 <td>Inserts into album_queue</td>
-                <td>Skips artists that already have albums queued</td>
-                <td><code>curl "http://localhost:3000/qobuz/queue-albums-from-artists?limit=20"</code></td>
+                <td>Stub</td>
+                <td><code>curl "http://localhost:3000/qobuz/queue-albums-from-artists"</code></td>
             </tr>
             <tr>
                 <td><code>GET /qobuz/download-artist-albums</code></td>
@@ -166,14 +167,32 @@
                 <td>Does not download files</td>
                 <td><code>curl "http://localhost:3000/qobuz/download-artist-albums?artist_id=6760&limit=10"</code></td>
             </tr>
+        </tbody>
+    </table>
+
+    <h2>Library</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Route</th>
+                <th>Purpose</th>
+                <th>Files read</th>
+                <th>Files written</th>
+                <th>SQL read</th>
+                <th>SQL written</th>
+                <th>Notes</th>
+                <th>Example</th>
+            </tr>
+        </thead>
+        <tbody>
             <tr>
                 <td><code>GET /library/search</code></td>
-                <td>Fuzzy search the local library</td>
+                <td>Search the local library</td>
                 <td>—</td>
                 <td>—</td>
-                <td>Reads tracks (includes genre)</td>
+                <td>Reads tracks</td>
                 <td>—</td>
-                <td>Handles typos; searches title, artist, album, genre</td>
+                <td>Searches title, artist, album, genre</td>
                 <td><code>curl "http://localhost:3000/library/search?q=jazz"</code></td>
             </tr>
             <tr>
@@ -181,9 +200,9 @@
                 <td>Synchronize the library folder with SQLite</td>
                 <td>Reads files under library/</td>
                 <td>—</td>
-                <td>Reads existing paths from tracks</td>
-                <td>Upserts tracks (genre from tags); rebuilds genres and track_genres tables</td>
-                <td>Preserves existing artist_id values; unique genres and track–genre links are rebuilt</td>
+                <td>—</td>
+                <td>Upserts tracks (tags via lofty)</td>
+                <td>Scans flac/wav/mp3/m4a/ogg</td>
                 <td><code>curl http://localhost:3000/library/scan</code></td>
             </tr>
             <tr>
@@ -193,39 +212,117 @@
                 <td>—</td>
                 <td>—</td>
                 <td>—</td>
-                <td>Loads the whole file into memory</td>
-                <td><code>curl "http://localhost:3000/library/stream_local?path=library/Qobuz/…"</code></td>
-            </tr>
-            <tr>
-                <td><code>GET /library/stream_qobuz</code></td>
-                <td>Stream a Qobuz track (download if missing)</td>
-                <td>Reads local file if present</td>
-                <td>Downloads FLAC if not cached</td>
-                <td>Looks up path in tracks</td>
-                <td>Upserts tracks on first download</td>
-                <td>Always streams from local storage</td>
-                <td><code>curl "http://localhost:3000/library/stream_qobuz?track_id=13176086&format_id=6"</code></td>
+                <td>Loads the whole file into memory; supports Range</td>
+                <td><code>curl "http://localhost:3000/library/stream_local?path=library/…"</code></td>
             </tr>
             <tr>
                 <td><code>GET /library/ai-search</code></td>
                 <td>LLM-powered semantic search</td>
                 <td>—</td>
                 <td>—</td>
-                <td>Reads artist names from tracks</td>
+                <td>Reads tracks</td>
                 <td>—</td>
-                <td>Uses Gemini</td>
+                <td>Uses Gemini (when configured)</td>
                 <td><code>curl "http://localhost:3000/library/ai-search?q=jazz%20legends"</code></td>
             </tr>
         </tbody>
     </table>
+
+    <h2>Playback Queue</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Route</th>
+                <th>Purpose</th>
+                <th>Files read</th>
+                <th>Files written</th>
+                <th>SQL read</th>
+                <th>SQL written</th>
+                <th>Notes</th>
+                <th>Example</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><code>GET /stream_from_track</code></td>
+                <td>Start playback of a track and fill the album queue</td>
+                <td>Local file (or downloads it)</td>
+                <td>Downloads missing tracks</td>
+                <td>Looks up track path</td>
+                <td>Upserts on download</td>
+                <td>Clears the queue if the album changes; sets current track</td>
+                <td><code>curl -I "http://localhost:3000/stream_from_track?track_id=13176086"</code></td>
+            </tr>
+            <tr>
+                <td><code>GET /queue</code></td>
+                <td>Show the current playback queue</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>In-memory; returns album, index, current track and full list</td>
+                <td><code>curl http://localhost:3000/queue</code></td>
+            </tr>
+            <tr>
+                <td><code>GET /queue/next_stream</code></td>
+                <td>Advance to the next track and stream it</td>
+                <td>Local file</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>Client calls this when the current track ends</td>
+                <td><code>curl -I http://localhost:3000/queue/next_stream</code></td>
+            </tr>
+            <tr>
+                <td><code>GET /queue/previous_stream</code></td>
+                <td>Go back to the previous track and stream it</td>
+                <td>Local file</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td><code>curl -I http://localhost:3000/queue/previous_stream</code></td>
+            </tr>
+            <tr>
+                <td><code>POST /queue/next</code></td>
+                <td>Advance the queue (JSON only)</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>Does not stream; returns the new current track</td>
+                <td><code>curl -X POST http://localhost:3000/queue/next</code></td>
+            </tr>
+            <tr>
+                <td><code>POST /queue/previous</code></td>
+                <td>Go back in the queue (JSON only)</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>Does not stream</td>
+                <td><code>curl -X POST http://localhost:3000/queue/previous</code></td>
+            </tr>
+            <tr>
+                <td><code>POST /queue/clear</code></td>
+                <td>Clear the playback queue</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td><code>curl -X POST http://localhost:3000/queue/clear</code></td>
+            </tr>
+        </tbody>
+    </table>
+
     <h2>Database Tables</h2>
     <ul>
-        <li><strong>tracks</strong> – path, title, artist, artist_id, album, track_number, duration, format, stream_url,
-            genre</li>
+        <li><strong>tracks</strong> – path, title, artist, artist_id, album, album_id, track_id, track_number, duration, format, stream_url, genre</li>
         <li><strong>genres</strong> – unique genre names</li>
         <li><strong>track_genres</strong> – many-to-many link between tracks and genres</li>
         <li><strong>artists</strong> – artist_id, name</li>
-        <li><strong>album_queue</strong> – album_id, artist, artist_id, title</li>
+        <li><strong>album_queue</strong> – album_id, artist, artist_id, title (download queue, not playback)</li>
     </ul>
 </body>
 
