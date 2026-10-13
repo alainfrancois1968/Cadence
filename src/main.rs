@@ -111,6 +111,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/queue/next_stream", get(queue_handlers::queue_next_stream))
         .route("/queue/previous_stream", get(queue_handlers::queue_previous_stream))
         .route("/queue/clear", axum::routing::post(queue_handlers::queue_clear))
+        .route("/stream_from_track_upsampled", get(queue_handlers::stream_from_track_upsampled))
         .route(
             "/qobuz/queue-albums-from-artists",
             get(qobuz_queue_albums_from_artists),

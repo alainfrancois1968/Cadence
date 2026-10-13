@@ -5,3 +5,4 @@
 downloads/
 .DS_Store
 cadence.db
+/cache

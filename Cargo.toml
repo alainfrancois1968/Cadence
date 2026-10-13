@@ -31,3 +31,7 @@ tokio-util = { version = "0.7.20", features = ["io"] }
 chrono = "0.4"
 
 symphonia = { version = "0.5", features = ["flac"] }
+
+rubato = "5"
+audioadapter-buffers = "5"
+flacenc = "0.5"
