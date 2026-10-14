@@ -36,3 +36,6 @@ rubato = "5"
 audioadapter-buffers = "5"
 
 libflac-rs = "0.143"
+
+regex = "1"
+base64 = "0.22"

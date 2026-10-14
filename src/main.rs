@@ -108,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
 
     {
         let mut q = qobuz.lock().await;
-        match QobuzSource::new() {
+        match QobuzSource::new().await {
             Ok(src) => {
                 info!("Qobuz authenticated successfully");
                 *q = Some(src);
