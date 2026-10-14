@@ -538,6 +538,7 @@ pub async fn download_track_to_library(
             Some("flac"),
             None,
             None,
+            None,
         )
         .await
         .map_err(|e| e.to_string())?;
