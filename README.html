@@ -59,7 +59,7 @@
 
 <body>
     <h1>Cadence Music Server – API Endpoints</h1>
-    <p>Updated October 2026. EQ presets, per-track and per-album upsampling (libflac-rs), and local streaming.</p>
+    <p>Updated October 2026. Per-track and per-album upsampling into the library folder.</p>
 
     <h2>Health & Qobuz</h2>
     <table>
@@ -242,7 +242,13 @@
         </tbody>
     </table>
 
-    <h2>Equalizer</h2>
+
+    <h2>EQ</h2>
+    <p>Parametric EQ (biquad, minimum-phase) and optional linear-phase FIR approximation.
+        Presets live in <code>eq_presets.json</code>; the active global settings are stored in
+        <code>eq_global.json</code>. Each preset may contain a <code>"linear_phase": true|false</code>
+        field (defaults to <code>false</code>).
+    </p>
     <table>
         <thead>
             <tr>
@@ -264,52 +270,58 @@
                 <td>—</td>
                 <td>—</td>
                 <td>—</td>
-                <td>Returns the preset map (seq → name + left/right bands)</td>
+                <td>Returns the preset map (keys “00”, “01”, …)</td>
                 <td><code>curl http://localhost:3000/library/eq/presets</code></td>
             </tr>
             <tr>
                 <td><code>POST /library/eq/apply</code></td>
-                <td>Apply a preset to a track</td>
-                <td><code>eq_presets.json</code></td>
-                <td>—</td>
-                <td>—</td>
-                <td>Updates <code>eq_settings</code> on the track</td>
-                <td><code>seq=00</code> clears EQ for that track. Other values store the full preset object.</td>
-                <td><code>curl -X POST "http://localhost:3000/library/eq/apply?path=library/…&seq=01"</code></td>
-            </tr>
-            <tr>
-                <td><code>POST /library/eq/global</code></td>
-                <td>Set the global EQ preset</td>
+                <td>Apply a preset to the global EQ</td>
                 <td><code>eq_presets.json</code></td>
                 <td><code>eq_global.json</code></td>
                 <td>—</td>
                 <td>—</td>
-                <td><code>seq=00</code> writes <code>{}</code> (no EQ). Otherwise writes the preset object.</td>
-                <td><code>curl -X POST "http://localhost:3000/library/eq/global?seq=02"</code></td>
+                <td>Body: <code>{"seq":"01"}</code>. Copies the preset (including
+                    <code>linear_phase</code>) into the global settings.
+                </td>
+                <td><code>curl -X POST -H "Content-Type: application/json" -d '{"seq":"01"}' http://localhost:3000/library/eq/apply</code>
+                </td>
             </tr>
             <tr>
                 <td><code>GET /library/eq/global</code></td>
-                <td>Read the current global EQ</td>
+                <td>Read the current global EQ settings</td>
                 <td><code>eq_global.json</code></td>
                 <td>—</td>
                 <td>—</td>
                 <td>—</td>
-                <td>Returns <code>{}</code> when no global EQ is set</td>
+                <td>Includes the <code>linear_phase</code> flag</td>
                 <td><code>curl http://localhost:3000/library/eq/global</code></td>
+            </tr>
+            <tr>
+                <td><code>POST /library/eq/global</code></td>
+                <td>Replace the global EQ settings</td>
+                <td>—</td>
+                <td><code>eq_global.json</code></td>
+                <td>—</td>
+                <td>—</td>
+                <td>Body is a full <code>EqSettings</code> object (bands + optional
+                    <code>linear_phase</code>). When <code>linear_phase</code> is true the
+                    FIR path is used at playback; otherwise the biquad path is used.
+                    Flat settings short-circuit both paths.
+                </td>
+                <td><code>curl -X POST -H "Content-Type: application/json" -d @eq_global.json http://localhost:3000/library/eq/global</code>
+                </td>
             </tr>
         </tbody>
     </table>
-
     <div class="note">
-        <strong>EQ notes</strong><br>
-        When a non-flat EQ is active (per-track or global), <code>/library/stream_local</code> and
-        <code>/stream_from_track</code> decode the source, apply the EQ, and return <code>audio/wav</code>.
-        The original file is left untouched. Upsampled files created by earlier versions of the encoder
-        may not be readable by the decoder; re-run <code>/upsample_track</code> after switching to
-        <code>libflac-rs</code> so the files are re-encoded with a standard STREAMINFO.
+        <strong>Linear-phase note:</strong> The linear-phase path designs a symmetric FIR
+        that approximates the magnitude response of the configured biquads (using the
+        <code>math-iir-fir</code> crate). It adds latency of roughly half the number of taps
+        (default 1025 → ~512 samples) and is mainly useful when EQ is actually applied.
+        With a flat EQ the result is identical to the minimum-phase path.
     </div>
 
-
+    <h2>Upsampling</h2>
     <table>
         <thead>
             <tr>
@@ -364,9 +376,7 @@
         Files are written next to the originals under an <code>upsampled/</code> subfolder. An existing file is left
         untouched when its bit depth and sample rate already match the environment; any other combination is replaced.
         The first request for a track is CPU-heavy (decode → resample → re-encode). Subsequent matching requests return
-        immediately with status <code>already_upsampled</code>.<br>
-        Encoding uses <code>libflac-rs</code> (bit-exact to libFLAC 1.4.3) so the resulting files are readable by
-        Symphonia. Files produced by the previous <code>flacenc</code> encoder should be deleted and re-created.
+        immediately with status <code>already_upsampled</code>.
     </div>
 
     <h2>Playback Queue</h2>

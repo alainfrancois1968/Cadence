@@ -71,7 +71,7 @@
                 "type": "highshelf"
             }
         ],
-        "linear_phase": false
+        "linear_phase": true
     },
     "02": {
         "name": "Slightly pull back the highs",
