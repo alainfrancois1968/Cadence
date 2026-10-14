@@ -24,6 +24,8 @@ use library::Library;
 use qobuz::QobuzSource;
 use queue::PlayQueue;
 
+use std::env;
+
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::tag::{Accessor, Tag, TagType};
@@ -44,6 +46,11 @@ struct DownloadParams {
     track_id: Option<i32>,
     album_id: Option<String>,
     format_id: Option<i32>,
+}
+
+#[derive(Deserialize)]
+struct UpsampleTrackParams {
+    track_id: i32,
 }
 
 /// Kill any previous process listening on port 3000 so a new run can bind.
@@ -112,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/queue/previous_stream", get(queue_handlers::queue_previous_stream))
         .route("/queue/clear", axum::routing::post(queue_handlers::queue_clear))
         .route("/stream_from_track_upsampled", get(queue_handlers::stream_from_track_upsampled))
+        .route("/upsample_track", get(upsample_track))
         .route(
             "/qobuz/queue-albums-from-artists",
             get(qobuz_queue_albums_from_artists),
@@ -778,6 +786,268 @@ pub async fn stream_local(
     }
 
     Ok(builder.body(Body::from(slice)).unwrap())
+}
+
+/// GET /upsample_track?track_id=13176086
+///
+/// Reads UPSAMPLE_BIT_DEPTH and UPSAMPLE_SAMPLE_RATE from the environment,
+/// decodes the local FLAC, resamples, re-encodes, copies tags, and writes
+/// the result to <album_dir>/upsampled/<original_filename>.
+/// Skips the work if an upsampled file already exists with the same
+/// bit depth and sample rate.
+async fn upsample_track(
+    State(state): State<AppState>,
+    Query(params): Query<UpsampleTrackParams>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let bit_depth = env::var("UPSAMPLE_BIT_DEPTH")
+        .ok()
+        .and_then(|s| s.parse::<u8>().ok())
+        .unwrap_or(24);
+    let target_rate = env::var("UPSAMPLE_SAMPLE_RATE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|n| if n < 1000 { n * 1000 } else { n })
+        .unwrap_or(96000);
+
+    if !matches!(bit_depth, 16 | 24) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "UPSAMPLE_BIT_DEPTH must be 16 or 24".into(),
+        ));
+    }
+    if !matches!(target_rate, 44100 | 48000 | 96000 | 192000) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "UPSAMPLE_SAMPLE_RATE must be 44100, 48000, 96000 or 192000".into(),
+        ));
+    }
+
+    let src_path = state
+        .library
+        .track_path(params.track_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "track not in library".into()))?;
+
+    let src = PathBuf::from(&src_path);
+    if !src.exists() {
+        return Err((StatusCode::NOT_FOUND, "source file missing".into()));
+    }
+
+    let album_dir = src.parent().ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "no parent directory".into(),
+    ))?;
+    let filename = src.file_name().ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "no filename".into(),
+    ))?;
+    let dest_dir = album_dir.join("upsampled");
+    tokio::fs::create_dir_all(&dest_dir)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let dest = dest_dir.join(filename);
+
+    // Skip if already upsampled with the same settings
+    if dest.exists() {
+    if let Ok(tagged) = lofty::read_from_path(&dest) {
+        let props = tagged.properties();
+        let existing_rate = props.sample_rate().unwrap_or(0) as usize;
+        let existing_bits = props.bit_depth().unwrap_or(0);
+
+        if existing_rate == target_rate && existing_bits == bit_depth {
+            return Ok(Json(serde_json::json!({
+                "track_id": params.track_id,
+                "source": src_path,
+                "upsampled": dest.to_string_lossy(),
+                "bit_depth": bit_depth,
+                "sample_rate": target_rate,
+                "status": "already_upsampled"
+            })));
+        }
+    }
+}
+
+    // Decode → resample → encode
+    let (pcm, src_rate, channels) = decode_flac_pcm(&src_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let out_pcm = if src_rate == target_rate {
+        pcm
+    } else {
+        upsample_pcm(&pcm, channels, src_rate, target_rate)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    };
+
+    let flac_bytes = encode_flac_bits(&out_pcm, target_rate, channels, bit_depth as usize)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    tokio::fs::write(&dest, &flac_bytes)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    copy_tags(&src, &dest).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({
+        "track_id": params.track_id,
+        "source": src_path,
+        "upsampled": dest.to_string_lossy(),
+        "bit_depth": bit_depth,
+        "sample_rate": target_rate,
+        "status": "ok"
+    })))
+}
+
+fn decode_flac_pcm(path: &str) -> Result<(Vec<f32>, usize, usize), String> {
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::codecs::DecoderOptions;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint = Hint::new();
+    hint.with_extension("flac");
+
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .map_err(|e| e.to_string())?;
+
+    let mut format = probed.format;
+    let track = format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec == symphonia::core::codecs::CODEC_TYPE_FLAC)
+        .ok_or("no FLAC track")?;
+
+    let track_id = track.id;
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .map_err(|e| e.to_string())?;
+
+    let sample_rate = track.codec_params.sample_rate.unwrap_or(44100) as usize;
+    let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(2);
+
+    let mut pcm = Vec::new();
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+        let decoded = decoder.decode(&packet).map_err(|e| e.to_string())?;
+        let mut buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
+        buf.copy_interleaved_ref(decoded);
+        pcm.extend_from_slice(buf.samples());
+    }
+    Ok((pcm, sample_rate, channels))
+}
+
+fn upsample_pcm(
+    input: &[f32],
+    channels: usize,
+    from_rate: usize,
+    to_rate: usize,
+) -> Result<Vec<f32>, String> {
+    use audioadapter_buffers::owned::InterleavedOwned;
+    use rubato::audioadapter::Adapter;
+    use rubato::{Fft, FixedSync, Resampler};
+
+    if from_rate == to_rate || input.is_empty() {
+        return Ok(input.to_vec());
+    }
+
+    let frames = input.len() / channels;
+    let input_f64: Vec<f64> = input.iter().map(|&s| s as f64).collect();
+    let input_buf = InterleavedOwned::<f64>::new_from(input_f64, channels, frames)
+        .map_err(|e| e.to_string())?;
+
+    let mut resampler = Fft::<f64>::new(from_rate, to_rate, 1024, channels, FixedSync::Both)
+        .map_err(|e| e.to_string())?;
+
+    let needed = resampler.process_all_needed_output_len(frames);
+    let mut output = InterleavedOwned::<f64>::new(0.0, channels, needed);
+
+    let (_consumed, produced) = resampler
+        .process_all_into_buffer(&input_buf, &mut output, frames, None)
+        .map_err(|e| e.to_string())?;
+
+    let mut result = Vec::with_capacity(produced * channels);
+    for i in 0..produced {
+        for c in 0..channels {
+            result.push(output.read_sample(c, i).unwrap() as f32);
+        }
+    }
+    Ok(result)
+}
+
+fn encode_flac_bits(
+    pcm: &[f32],
+    sample_rate: usize,
+    channels: usize,
+    bit_depth: usize,
+) -> Result<Vec<u8>, String> {
+    use flacenc::component::BitRepr;
+    use flacenc::error::Verify;
+
+    let max = (1i32 << (bit_depth - 1)) - 1;
+    let scale = max as f32;
+
+    let samples: Vec<i32> = pcm
+        .iter()
+        .map(|&s| {
+            let clamped = s.clamp(-1.0, 1.0);
+            (clamped * scale).round() as i32
+        })
+        .collect();
+
+    let config = flacenc::config::Encoder::default()
+        .into_verified()
+        .map_err(|e| format!("{:?}", e))?;
+
+    let source = flacenc::source::MemSource::from_samples(
+        &samples,
+        channels,
+        bit_depth,
+        sample_rate,
+    );
+
+    let flac_stream = flacenc::encode_with_fixed_block_size(&config, source, config.block_size)
+        .map_err(|e| format!("{:?}", e))?;
+
+    let mut sink = flacenc::bitsink::ByteSink::new();
+    flac_stream
+        .write(&mut sink)
+        .map_err(|e| format!("{:?}", e))?;
+    Ok(sink.as_slice().to_vec())
+}
+
+fn copy_tags(src: &PathBuf, dest: &PathBuf) -> Result<(), String> {
+    use lofty::config::WriteOptions;
+    use lofty::file::TaggedFileExt;
+
+    let src_tagged = lofty::read_from_path(src).map_err(|e| e.to_string())?;
+    let mut dest_tagged = lofty::read_from_path(dest).map_err(|e| e.to_string())?;
+
+    dest_tagged.clear();
+    if let Some(src_tag) = src_tagged.primary_tag() {
+        dest_tagged.insert_tag(src_tag.clone());
+    }
+
+    dest_tagged
+        .save_to_path(dest, WriteOptions::default())
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 async fn library_ai_search(

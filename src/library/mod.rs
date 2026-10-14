@@ -202,6 +202,11 @@ impl Library {
         let mut count = 0i64;
         for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
             let path = entry.path();
+            // Skip anything under an "upsampled" directory
+            if path.components().any(|c| c.as_os_str() == "upsampled") {
+                continue;
+            }
+
             if !path.is_file() {
                 continue;
             }
