@@ -51,6 +51,14 @@
             display: block;
             margin-top: 0.4rem;
         }
+
+        canvas {
+            width: 100%;
+            height: 120px;
+            background: #fff;
+            border: 1px solid #ddd;
+            margin: 0.5rem 0 1rem 0;
+        }
     </style>
 </head>
 
@@ -79,6 +87,7 @@
     </p>
 
     <audio id="player" controls></audio>
+    <canvas id="waveform" width="800" height="120"></canvas>
     <div class="status" id="status">Ready</div>
 
     <p>
@@ -96,6 +105,10 @@
         const player = document.getElementById("player");
         const status = document.getElementById("status");
         const queueEl = document.getElementById("queue");
+        const canvas = document.getElementById("waveform");
+
+        let currentWaveform = null;
+        let currentPath = null;
 
         function setStatus(msg) {
             status.textContent = msg;
@@ -105,13 +118,80 @@
             return document.querySelector('input[name="mode"]:checked').value;
         }
 
+        function drawStereoWaveform(progress) {
+            const ctx = canvas.getContext("2d");
+            const w = canvas.width;
+            const h = canvas.height;
+            ctx.clearRect(0, 0, w, h);
+
+            if (!currentWaveform) {
+                ctx.fillStyle = "#999";
+                ctx.font = "14px system-ui";
+                ctx.fillText("No waveform", 10, h / 2);
+                return;
+            }
+
+            const left = currentWaveform.l || [];
+            const right = currentWaveform.r || [];
+            const mid = h / 2;
+            const barW = w / Math.max(left.length, 1);
+
+            // Center line
+            ctx.strokeStyle = "#ddd";
+            ctx.beginPath();
+            ctx.moveTo(0, mid);
+            ctx.lineTo(w, mid);
+            ctx.stroke();
+
+            // Left channel (up)
+            ctx.fillStyle = "#4a90d9";
+            left.forEach((p, i) => {
+                const barH = p * (mid - 4);
+                ctx.fillRect(i * barW, mid - barH, Math.max(barW - 1, 1), barH);
+            });
+
+            // Right channel (down)
+            ctx.fillStyle = "#e67e22";
+            right.forEach((p, i) => {
+                const barH = p * (mid - 4);
+                ctx.fillRect(i * barW, mid, Math.max(barW - 1, 1), barH);
+            });
+
+            // Playhead
+            if (progress >= 0 && progress <= 1) {
+                ctx.fillStyle = "#c0392b";
+                ctx.fillRect(progress * w, 0, 2, h);
+            }
+        }
+
+        async function loadWaveform(path) {
+            if (!path || path === currentPath) return;
+            currentPath = path;
+            currentWaveform = null;
+            drawStereoWaveform(0);
+
+            try {
+                // Fetch waveform via library search (matches on path/filename)
+                const filename = path.split("/").pop();
+                const r = await fetch(SERVER + "/library/search?q=" + encodeURIComponent(filename));
+                const data = await r.json();
+                const tracks = data.tracks || [];
+                const match = tracks.find(t => t.path === path) || tracks[0];
+                if (match && match.waveform) {
+                    currentWaveform = JSON.parse(match.waveform);
+                    drawStereoWaveform(player.currentTime / (player.duration || 1));
+                }
+            } catch (e) {
+                console.warn("waveform load failed", e);
+            }
+        }
+
         async function play() {
             const mode = currentMode();
             const inputId = mode === "gapless" ? "url-gapless" : "url";
             let url = document.getElementById(inputId).value.trim();
             if (!url) return;
 
-            // Allow pasting just a track_id
             if (/^\d+$/.test(url)) {
                 const endpoint = mode === "gapless" ? "/stream_from_track_gapless" : "/stream_from_track";
                 url = SERVER + `${endpoint}?track_id=${url}`;
@@ -140,6 +220,9 @@
         async function clearQueue() {
             await fetch(SERVER + "/queue/clear", { method: "POST" });
             setStatus("Queue cleared");
+            currentWaveform = null;
+            currentPath = null;
+            drawStereoWaveform(0);
             refresh();
         }
 
@@ -148,10 +231,22 @@
                 const r = await fetch(SERVER + "/queue");
                 const data = await r.json();
                 queueEl.textContent = JSON.stringify(data, null, 2);
+
+                // Load waveform for the currently playing track
+                const current = data.current || data.current_track;
+                if (current && current.path) {
+                    loadWaveform(current.path);
+                }
             } catch (e) {
                 queueEl.textContent = "Error loading queue: " + e.message;
             }
         }
+
+        player.addEventListener("timeupdate", () => {
+            if (player.duration) {
+                drawStereoWaveform(player.currentTime / player.duration);
+            }
+        });
 
         player.addEventListener("ended", () => {
             setStatus("Track ended — loading next");

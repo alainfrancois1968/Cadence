@@ -272,6 +272,41 @@ impl Library {
 
             count += 1;
         }
+        // Delete rows from the tracks table when the file is gone,
+        // but keep the row if its track_id is unique.
+        let rows = sqlx::query("SELECT path, track_id FROM tracks")
+            .fetch_all(&self.pool)
+            .await?;
+
+        for row in rows {
+            let path: String = row.try_get("path").unwrap_or_default();
+            if std::path::Path::new(&path).exists() {
+                continue;
+            }
+
+            let track_id: Option<i32> = row.try_get("track_id").ok().flatten();
+
+            // Keep the row if this track_id appears only once
+            if let Some(tid) = track_id {
+                let count: (i64,) =
+                    sqlx::query_as("SELECT COUNT(*) FROM tracks WHERE track_id = ?")
+                        .bind(tid)
+                        .fetch_one(&self.pool)
+                        .await?;
+
+                if count.0 == 1 {
+                    tracing::info!("Keeping unique track_id {} (file missing): {}", tid, path);
+                    continue;
+                }
+            }
+
+            // File is gone and track_id is missing or duplicated → delete the row only
+            sqlx::query("DELETE FROM tracks WHERE path = ?")
+                .bind(&path)
+                .execute(&self.pool)
+                .await?;
+            tracing::info!("Deleted row for missing file: {}", path);
+        }
         Ok(count)
     }
 
