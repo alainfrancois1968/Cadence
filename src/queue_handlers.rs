@@ -621,15 +621,23 @@ async fn load_album_tracks(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
         };
 
+        // Look up DR and waveform already stored for this path
+        let (dr_score, waveform) = match state.library.get_dr_and_waveform(&path).await {
+            Ok((dr, wf)) => (dr, wf),
+            Err(_) => (None, None),
+        };
+
         tracks.push(QueueTrack {
             track_id: *tid,
-            title: String::new(), // filled below if we want; optional
+            title: String::new(),
             artist: artist_name.clone(),
             album: album_title.clone(),
             album_id: album_id.clone(),
             path,
             duration: 0.0,
             track_number: Some((idx + 1) as i32),
+            dr_score,
+            waveform,
         });
     }
 

@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+
 pub struct QueueTrack {
     pub track_id: i32,
     pub title: String,
@@ -15,6 +16,8 @@ pub struct QueueTrack {
     pub path: String,
     pub duration: f64,
     pub track_number: Option<i32>,
+    pub dr_score: Option<f64>,
+    pub waveform: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]

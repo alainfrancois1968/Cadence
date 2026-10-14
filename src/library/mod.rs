@@ -367,6 +367,18 @@ impl Library {
                 .await?;
         Ok(row.map(|(p,)| p))
     }
+    /// Returns (dr_score, waveform) for a path, if present.
+    pub async fn get_dr_and_waveform(
+        &self,
+        path: &str,
+    ) -> Result<(Option<f64>, Option<String>), sqlx::Error> {
+        let row: Option<(Option<f64>, Option<String>)> =
+            sqlx::query_as("SELECT dr_score, waveform FROM tracks WHERE path = ?")
+                .bind(path)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.unwrap_or((None, None)))
+    }
 }
 
 /// Compute stereo peak arrays and return JSON {"l":[...],"r":[...]}.
