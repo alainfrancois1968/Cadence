@@ -127,3 +127,7 @@ curl -I "http://localhost:3000/library/stream_local?path=library/Qobuz/6760%20-%
 
 
 
+cd ~/Projects/Cadence
+./target/release/cadence
+
+

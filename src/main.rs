@@ -966,10 +966,16 @@ fn decode_and_eq(path: &str, settings: &crate::eq::EqSettings) -> Result<(Vec<u8
         pcm.extend_from_slice(buf.samples());
     }
 
+    let n_taps = std::env::var("FIR_N_TAPS")
+    .ok()
+    .and_then(|s| s.parse().ok())
+    .filter(|&n| n >= 3 && n % 2 == 1)
+    .unwrap_or(1025);
+
     let processed = if settings.linear_phase {
-        eq_fir::apply_eq_linear_phase(&pcm, sample_rate, &settings, 1025)
+        eq_fir::apply_eq_linear_phase(&pcm, sample_rate, &settings, n_taps)
     } else {
-        crate::eq::apply_eq(&pcm, sample_rate, settings)
+        crate::eq::apply_eq(&pcm, sample_rate, &settings)
     };
 
     let wav = crate::eq::to_wav(&processed, sample_rate, bit_depth);

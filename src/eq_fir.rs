@@ -1,6 +1,8 @@
 use crate::eq::{is_flat, EqBand, EqSettings};
 use math_audio_iir_fir::{Biquad, BiquadFilterType, Fir};
 
+use std::env;
+
 /// Apply a linear-phase FIR approximation of the given EqSettings.
 ///
 /// `n_taps` must be odd (e.g. 1025, 2049). Larger values give a closer
@@ -114,4 +116,20 @@ fn process_fir(fir: &Fir, input: &[f32]) -> Vec<f32> {
         output[i] = acc as f32;
     }
     output
+}
+
+fn fir_n_taps() -> usize {
+    env::var("FIR_N_TAPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n >= 3 && n % 2 == 1)
+        .unwrap_or(1025)
+}
+
+fn fir_design_points() -> usize {
+    env::var("FIR_DESIGN_POINTS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n >= 64)
+        .unwrap_or(1024)
 }
