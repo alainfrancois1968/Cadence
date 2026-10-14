@@ -163,10 +163,13 @@ pub fn apply_eq(samples: &[f32], sample_rate: u32, settings: &EqSettings) -> Vec
 }
 
 /// Build a minimal 16-bit stereo WAV from f32 samples.
-pub fn to_wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
+pub fn to_wav(samples: &[f32], sample_rate: u32, bit_depth: u32) -> Vec<u8> {
+    let bit_depth = if bit_depth == 24 { 24 } else { 16 }; // only 16 or 24 supported
+    let bytes_per_sample = bit_depth / 8;
     let num_samples = samples.len() as u32;
-    let byte_rate = sample_rate * 4; // 16-bit stereo
-    let data_size = num_samples * 2;
+    let block_align = 2 * bytes_per_sample; // stereo
+    let byte_rate = sample_rate * block_align;
+    let data_size = num_samples * bytes_per_sample;
     let file_size = 36 + data_size;
 
     let mut wav = Vec::with_capacity(44 + data_size as usize);
@@ -174,19 +177,25 @@ pub fn to_wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     wav.extend_from_slice(&file_size.to_le_bytes());
     wav.extend_from_slice(b"WAVE");
     wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes()); // chunk size
+    wav.extend_from_slice(&16u32.to_le_bytes());
     wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
     wav.extend_from_slice(&2u16.to_le_bytes()); // stereo
     wav.extend_from_slice(&sample_rate.to_le_bytes());
     wav.extend_from_slice(&byte_rate.to_le_bytes());
-    wav.extend_from_slice(&4u16.to_le_bytes()); // block align
-    wav.extend_from_slice(&16u16.to_le_bytes()); // bits
+    wav.extend_from_slice(&(block_align as u16).to_le_bytes());
+    wav.extend_from_slice(&(bit_depth as u16).to_le_bytes());
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&data_size.to_le_bytes());
 
     for s in samples {
-        let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-        wav.extend_from_slice(&v.to_le_bytes());
+        let clamped = s.clamp(-1.0, 1.0);
+        if bit_depth == 24 {
+            let v = (clamped * 8_388_607.0) as i32;
+            wav.extend_from_slice(&v.to_le_bytes()[..3]);
+        } else {
+            let v = (clamped * 32_767.0) as i16;
+            wav.extend_from_slice(&v.to_le_bytes());
+        }
     }
     wav
 }

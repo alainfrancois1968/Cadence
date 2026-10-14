@@ -806,14 +806,16 @@ async fn stream_local(
         } else {
             match serde_json::from_str::<crate::eq::EqSettings>(&json) {
                 Ok(settings) if !crate::eq::is_flat(&settings) => {
-                    match decode_and_eq(&path, &settings) {
-                        Ok((wav, rate)) => (wav, "audio/wav", 16u32, rate),
-                        Err(e) => {
-                            tracing::warn!("EQ failed, falling back to FLAC: {}", e);
-                            let (bits, rate) = probe_flac_format(&path).unwrap_or((0, 0));
-                            (bytes, "audio/flac", bits, rate)
-                        }
+
+                match decode_and_eq(&path, &settings) {
+                    Ok((wav, rate, bits)) => (wav, "audio/wav", bits, rate),
+                    Err(e) => {
+                        tracing::warn!("EQ failed, falling back to FLAC: {}", e);
+                        let (b, r) = probe_flac_format(&path).unwrap_or((0, 0));
+                        (bytes, "audio/flac", b, r)
                     }
+                }
+
                 }
                 _ => {
                     let (bits, rate) = probe_flac_format(&path).unwrap_or((0, 0));
@@ -911,7 +913,7 @@ fn probe_flac_format(path: &str) -> Option<(u32, u32)> {
 }
 
 /// Decode FLAC bytes, apply EQ, return WAV bytes and sample rate.
-fn decode_and_eq(path: &str, settings: &crate::eq::EqSettings) -> Result<(Vec<u8>, u32), String> {
+fn decode_and_eq(path: &str, settings: &crate::eq::EqSettings) -> Result<(Vec<u8>, u32, u32), String> {
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::formats::FormatOptions;
@@ -939,6 +941,7 @@ fn decode_and_eq(path: &str, settings: &crate::eq::EqSettings) -> Result<(Vec<u8
         .ok_or("no audio track")?;
 
     let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
+    let bit_depth = track.codec_params.bits_per_sample.unwrap_or(16);
     let track_id = track.id;
 
     let mut decoder = symphonia::default::get_codecs()
@@ -964,8 +967,8 @@ fn decode_and_eq(path: &str, settings: &crate::eq::EqSettings) -> Result<(Vec<u8
     }
 
     let processed = crate::eq::apply_eq(&pcm, sample_rate, settings);
-    let wav = crate::eq::to_wav(&processed, sample_rate);
-    Ok((wav, sample_rate))
+    let wav = crate::eq::to_wav(&processed, sample_rate, bit_depth);
+    Ok((wav, sample_rate, bit_depth))
 }
 
 /// GET /upsample_track?track_id=13176086
