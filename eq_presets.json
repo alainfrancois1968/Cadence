@@ -2,7 +2,8 @@
     "00": {
         "name": "No EQ",
         "left": [],
-        "right": []
+        "right": [],
+        "linear_phase": false
     },
     "01": {
         "name": "Slightly boost bass",
@@ -69,7 +70,8 @@
                 "q": 0.7,
                 "type": "highshelf"
             }
-        ]
+        ],
+        "linear_phase": false
     },
     "02": {
         "name": "Slightly pull back the highs",
@@ -136,7 +138,8 @@
                 "q": 0.7,
                 "type": "highshelf"
             }
-        ]
+        ],
+        "linear_phase": false
     },
     "03": {
         "name": "Vocal presence",
@@ -203,7 +206,8 @@
                 "q": 0.7,
                 "type": "highshelf"
             }
-        ]
+        ],
+        "linear_phase": false
     },
     "04": {
         "name": "Warm",
@@ -258,6 +262,7 @@
                 "q": 0.7,
                 "type": "highshelf"
             }
-        ]
+        ],
+        "linear_phase": false
     }
 }

@@ -39,3 +39,5 @@ libflac-rs = "0.143"
 
 regex = "1"
 base64 = "0.22"
+
+math-iir-fir = "0.5"

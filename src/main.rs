@@ -14,6 +14,8 @@ use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
+use lofty::file::AudioFile;
+
 mod library;
 mod qobuz;
 mod queue;
@@ -27,14 +29,12 @@ use queue::PlayQueue;
 use std::env;
 
 mod eq;
+mod eq_fir;
 
-use lofty::file::{AudioFile, TaggedFileExt};
-use lofty::picture::{MimeType, Picture, PictureType};
-use lofty::tag::{Accessor, Tag, TagType};
-use lofty::config::WriteOptions;
 use std::path::PathBuf;
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
+
+use math_audio_iir_fir::{Biquad, BiquadFilterType, Fir};
+
 
 #[derive(Clone)]
 struct AppState {
@@ -966,7 +966,12 @@ fn decode_and_eq(path: &str, settings: &crate::eq::EqSettings) -> Result<(Vec<u8
         pcm.extend_from_slice(buf.samples());
     }
 
-    let processed = crate::eq::apply_eq(&pcm, sample_rate, settings);
+    let processed = if settings.linear_phase {
+        eq_fir::apply_eq_linear_phase(&pcm, sample_rate, &settings, 1025)
+    } else {
+        crate::eq::apply_eq(&pcm, sample_rate, settings)
+    };
+
     let wav = crate::eq::to_wav(&processed, sample_rate, bit_depth);
     Ok((wav, sample_rate, bit_depth))
 }

@@ -10,6 +10,8 @@ pub struct EqBand {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EqSettings {
+    #[serde(default)]
+    pub linear_phase: bool,
     pub left: Vec<EqBand>,
     pub right: Vec<EqBand>,
 }
