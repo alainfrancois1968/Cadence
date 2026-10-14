@@ -59,7 +59,7 @@
 
 <body>
     <h1>Cadence Music Server – API Endpoints</h1>
-    <p>Updated October 2026. Includes gapless and upsampled streaming endpoints.</p>
+    <p>Updated October 2026. Per-track and per-album upsampling into the library folder.</p>
 
     <h2>Health & Qobuz</h2>
     <table>
@@ -128,7 +128,8 @@
                     + cover with lofty. Computes and stores dynamic-range score.</td>
                 <td>Track:
                     <code>curl "http://localhost:3000/qobuz/download?track_id=13176086&format_id=6"</code><br>Album:
-                    <code>curl "http://localhost:3000/qobuz/download?album_id=5099749522428&format_id=6"</code></td>
+                    <code>curl "http://localhost:3000/qobuz/download?album_id=5099749522428&format_id=6"</code>
+                </td>
             </tr>
             <tr>
                 <td><code>GET /qobuz/album-id</code></td>
@@ -241,6 +242,64 @@
         </tbody>
     </table>
 
+    <h2>Upsampling</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Route</th>
+                <th>Purpose</th>
+                <th>Files read</th>
+                <th>Files written</th>
+                <th>SQL read</th>
+                <th>SQL written</th>
+                <th>Notes</th>
+                <th>Example</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><code>GET /upsample_track</code></td>
+                <td>Upsample a single local track</td>
+                <td>Source FLAC under library/</td>
+                <td>Writes
+                    <code>…/{album}/upsampled/{original_filename}</code>
+                    and copies tags
+                </td>
+                <td>Looks up track path</td>
+                <td>—</td>
+                <td>Uses <code>UPSAMPLE_BIT_DEPTH</code> (16|24) and
+                    <code>UPSAMPLE_SAMPLE_RATE</code> (44100|48000|96000|192000, or short form 44|48|96|192).
+                    Skips work if an existing file already matches both settings. Otherwise replaces it.
+                </td>
+                <td><code>curl "http://localhost:3000/upsample_track?track_id=13176086"</code></td>
+            </tr>
+            <tr>
+                <td><code>GET /upsample_album</code></td>
+                <td>Upsample every track of an album</td>
+                <td>All local tracks of the album</td>
+                <td>Upsampled FLACs under the album’s
+                    <code>upsampled/</code> folder + <code>cover.jpg</code> if missing
+                </td>
+                <td>Looks up track paths</td>
+                <td>—</td>
+                <td>Calls the same logic as <code>/upsample_track</code> for each track. Downloads cover into the
+                    upsampled folder when absent.</td>
+                <td><code>curl "http://localhost:3000/upsample_album?album_id=5099749522428"</code></td>
+            </tr>
+        </tbody>
+    </table>
+
+    <div class="note">
+        <strong>Upsampling notes</strong><br>
+        Settings come from the environment (<code>.env</code>):<br>
+        <code>UPSAMPLE_BIT_DEPTH=24</code> (16 or 24)<br>
+        <code>UPSAMPLE_SAMPLE_RATE=96000</code> (or short form <code>96</code>)<br>
+        Files are written next to the originals under an <code>upsampled/</code> subfolder. An existing file is left
+        untouched when its bit depth and sample rate already match the environment; any other combination is replaced.
+        The first request for a track is CPU-heavy (decode → resample → re-encode). Subsequent matching requests return
+        immediately with status <code>already_upsampled</code>.
+    </div>
+
     <h2>Playback Queue</h2>
     <table>
         <thead>
@@ -277,18 +336,6 @@
                 <td>Concatenates raw FLAC bytes from the requested track to the end of the album. First request can be
                     large.</td>
                 <td><code>curl -I "http://localhost:3000/stream_from_track_gapless?track_id=13176086"</code></td>
-            </tr>
-            <tr>
-                <td><code>GET /stream_from_track_upsampled</code></td>
-                <td>Upsample the remainder of the album and stream a single FLAC</td>
-                <td>All remaining track files</td>
-                <td>Writes <code>cache/upsampled/{album_id}_{track_id}_{rate}.flac</code></td>
-                <td>Looks up paths</td>
-                <td>Upserts on download</td>
-                <td>Decodes with symphonia, upsamples with rubato (FFT), re-encodes to 16-bit FLAC with flacenc. Caches
-                    the result. First request is CPU-heavy; subsequent requests are instant.</td>
-                <td><code>curl -I "http://localhost:3000/stream_from_track_upsampled?track_id=13176086&target_rate=96000"</code>
-                </td>
             </tr>
             <tr>
                 <td><code>GET /queue</code></td>
@@ -353,14 +400,6 @@
         </tbody>
     </table>
 
-    <div class="note">
-        <strong>Upsampling notes</strong><br>
-        The first call to <code>/stream_from_track_upsampled</code> for a given album + start track + target rate is
-        slow because it decodes, resamples (FFT), and re-encodes the entire remaining album before returning any audio.
-        The result is written to <code>cache/upsampled/</code>. Subsequent requests for the same combination serve the
-        cached file immediately. Default target rate is 96 kHz. Lower rates (48000) are faster for testing.
-    </div>
-
     <h2>Database Tables</h2>
     <ul>
         <li><strong>tracks</strong> – path, title, artist, artist_id, album, album_id, track_id, track_number, duration,
@@ -377,14 +416,21 @@
     cover.jpg
     01. {track_id} - {title}.flac
     02. {track_id} - {title}.flac
-    ...</code></pre>
+    ...
+    upsampled/
+        cover.jpg
+        01. {track_id} - {title}.flac
+        02. {track_id} - {title}.flac
+        ...</code></pre>
     <p>Existing files are skipped. Tags and front-cover art are embedded with lofty. A dynamic-range score is computed
-        and stored in the <code>tracks</code> table.</p>
+        and stored in the <code>tracks</code> table. Upsampled files live in the <code>upsampled/</code> subfolder and
+        are only rewritten when their bit depth or sample rate differs from the current environment settings.</p>
 
-    <h2>Cache layout</h2>
-    <p>Upsampled streams are cached here:</p>
-    <pre><code>cache/upsampled/{album_id}_{track_id}_{target_rate}.flac</code></pre>
-    <p>These files can be deleted safely; they will be regenerated on the next request.</p>
+    <h2>Environment</h2>
+    <p>Copy <code>.env.example</code> to <code>.env</code> and set at least the Qobuz credentials. Optional upsampling
+        overrides:</p>
+    <pre><code>UPSAMPLE_BIT_DEPTH=24
+UPSAMPLE_SAMPLE_RATE=96000</code></pre>
 </body>
 
 </html>
