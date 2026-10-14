@@ -53,6 +53,11 @@ struct UpsampleTrackParams {
     track_id: i32,
 }
 
+#[derive(Deserialize)]
+struct UpsampleAlbumParams {
+    album_id: String,
+}
+
 /// Kill any previous process listening on port 3000 so a new run can bind.
 fn kill_previous_instance() {
     if let Ok(output) = std::process::Command::new("lsof")
@@ -120,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/queue/clear", axum::routing::post(queue_handlers::queue_clear))
         .route("/stream_from_track_upsampled", get(queue_handlers::stream_from_track_upsampled))
         .route("/upsample_track", get(upsample_track))
+        .route("/upsample_album", get(upsample_album))
         .route(
             "/qobuz/queue-albums-from-artists",
             get(qobuz_queue_albums_from_artists),
@@ -1054,4 +1060,86 @@ async fn library_ai_search(
     Query(_params): Query<std::collections::HashMap<String, String>>,
 ) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "message": "AI search placeholder" }))
+}
+
+/// GET /upsample_album?album_id=...
+///
+/// Upsamples every track of the album (using the same rules as /upsample_track)
+/// and writes cover.jpg into the upsampled folder if it is not already there.
+async fn upsample_album(
+    State(state): State<AppState>,
+    Query(params): Query<UpsampleAlbumParams>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let q = state.qobuz.lock().await;
+    let source = q.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Qobuz not available".into(),
+    ))?;
+
+    let album_id = params.album_id.clone();
+    let service = source.service();
+
+    let album = tokio::task::spawn_blocking(move || {
+        let service = service.blocking_lock();
+        service
+            .get_album(&album_id, Some("track_ids"))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let track_ids = album.track_ids.unwrap_or_default();
+    let mut results = Vec::new();
+    let mut upsampled_dir: Option<PathBuf> = None;
+
+    for tid in &track_ids {
+        // Re-use the same logic as /upsample_track
+        let fake = UpsampleTrackParams { track_id: *tid };
+        match upsample_track(State(state.clone()), Query(fake)).await {
+            Ok(json) => {
+                let v = json.0;
+                if let Some(path) = v.get("upsampled").and_then(|p| p.as_str()) {
+                    if upsampled_dir.is_none() {
+                        upsampled_dir = PathBuf::from(path).parent().map(|p| p.to_path_buf());
+                    }
+                }
+                results.push(v);
+            }
+            Err((code, msg)) => {
+                results.push(serde_json::json!({
+                    "track_id": tid,
+                    "status": "error",
+                    "code": code.as_u16(),
+                    "message": msg
+                }));
+            }
+        }
+    }
+
+    // Download cover into the upsampled folder if missing
+    if let Some(dir) = upsampled_dir {
+        let cover_path = dir.join("cover.jpg");
+        if !cover_path.exists() {
+            if let Some(image_url) = album
+                .image
+                .as_ref()
+                .and_then(|img| img.large.as_deref().or(img.thumbnail.as_deref()))
+            {
+                if let Ok(resp) = reqwest::Client::new().get(image_url).send().await {
+                    if resp.status().is_success() {
+                        if let Ok(bytes) = resp.bytes().await {
+                            let _ = tokio::fs::write(&cover_path, &bytes).await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "album_id": params.album_id,
+        "tracks": results,
+        "status": "ok"
+    })))
 }
