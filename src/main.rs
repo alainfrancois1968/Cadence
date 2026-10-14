@@ -761,7 +761,6 @@ async fn stream_local(
         .get("path")
         .ok_or((StatusCode::BAD_REQUEST, "missing path".into()))?;
 
-    // Look up EQ against the original path (presets are stored there).
     let track_eq = state.library.get_eq_settings(raw_path).await.ok().flatten();
 
     let eq_json = if track_eq.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
@@ -770,16 +769,22 @@ async fn stream_local(
         track_eq.clone()
     };
 
-    // When EQ is active, always decode the original file.
     let eq_active = eq_json
         .as_ref()
         .map(|s| !s.trim().is_empty() && s.trim() != "{}")
         .unwrap_or(false);
 
+    let preferred = prefer_upsampled(raw_path);
     let path = if eq_active {
-        raw_path.clone()
+        // Prefer upsampled when EQ is on, but only if Symphonia can read it.
+        if probe_flac_format(&preferred).is_some() {
+            preferred
+        } else {
+            tracing::warn!("upsampled unreadable, using original for EQ: {}", preferred);
+            raw_path.clone()
+        }
     } else {
-        prefer_upsampled(raw_path)
+        preferred
     };
 
     let bytes = tokio::fs::read(&path)
@@ -794,25 +799,31 @@ async fn stream_local(
         eq_json.as_deref()
     );
 
-    let (body_bytes, content_type) = if let Some(json) = eq_json {
+    let (body_bytes, content_type, bit_depth, sample_rate) = if let Some(json) = eq_json {
         if json.trim().is_empty() || json.trim() == "{}" {
-            (bytes, "audio/flac")
+            let (bits, rate) = probe_flac_format(&path).unwrap_or((0, 0));
+            (bytes, "audio/flac", bits, rate)
         } else {
             match serde_json::from_str::<crate::eq::EqSettings>(&json) {
                 Ok(settings) if !crate::eq::is_flat(&settings) => {
                     match decode_and_eq(&path, &settings) {
-                        Ok((wav, _)) => (wav, "audio/wav"),
+                        Ok((wav, rate)) => (wav, "audio/wav", 16u32, rate),
                         Err(e) => {
                             tracing::warn!("EQ failed, falling back to FLAC: {}", e);
-                            (bytes, "audio/flac")
+                            let (bits, rate) = probe_flac_format(&path).unwrap_or((0, 0));
+                            (bytes, "audio/flac", bits, rate)
                         }
                     }
                 }
-                _ => (bytes, "audio/flac"),
+                _ => {
+                    let (bits, rate) = probe_flac_format(&path).unwrap_or((0, 0));
+                    (bytes, "audio/flac", bits, rate)
+                }
             }
         }
     } else {
-        (bytes, "audio/flac")
+        let (bits, rate) = probe_flac_format(&path).unwrap_or((0, 0));
+        (bytes, "audio/flac", bits, rate)
     };
 
     let file_size = body_bytes.len() as u64;
@@ -860,9 +871,11 @@ async fn stream_local(
         .header(header::CONTENT_TYPE, content_type)
         .header(header::CONTENT_LENGTH, content_length)
         .header(header::ACCEPT_RANGES, "bytes")
+        .header("X-Bit-Depth", bit_depth.to_string())
+        .header("X-Sample-Rate", sample_rate.to_string())
         .header(
             "Access-Control-Expose-Headers",
-            "Content-Range, Accept-Ranges, Content-Length",
+            "Content-Range, Accept-Ranges, Content-Length, X-Bit-Depth, X-Sample-Rate",
         );
 
     if status == StatusCode::PARTIAL_CONTENT {
@@ -875,6 +888,26 @@ async fn stream_local(
     builder
         .body(Body::from(slice))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+fn probe_flac_format(path: &str) -> Option<(u32, u32)> {
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+    use std::fs::File;
+
+    let file = File::open(path).ok()?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    hint.with_extension("flac");
+    let probed = symphonia::default::get_probe()
+        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .ok()?;
+    let t = probed.format.tracks().iter().next()?;
+    let rate = t.codec_params.sample_rate?;
+    let bits = t.codec_params.bits_per_sample.unwrap_or(0);
+    Some((bits, rate))
 }
 
 /// Decode FLAC bytes, apply EQ, return WAV bytes and sample rate.

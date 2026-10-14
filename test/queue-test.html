@@ -88,6 +88,7 @@
 
     <audio id="player" controls></audio>
     <canvas id="waveform" width="800" height="120"></canvas>
+    <div class="status" id="format">Format: –</div>
     <div class="status" id="dr">DR: –</div>
     <div class="status" id="status">Ready</div>
 
@@ -108,6 +109,7 @@
         const queueEl = document.getElementById("queue");
         const canvas = document.getElementById("waveform");
         const drEl = document.getElementById("dr");
+        const formatEl = document.getElementById("format");
 
         let currentWaveform = null;
 
@@ -117,6 +119,17 @@
 
         function showDr(score) {
             drEl.textContent = (score == null) ? "DR: –" : "DR: " + Number(score).toFixed(1);
+        }
+
+        async function showFormat(url) {
+            try {
+                const r = await fetch(url, { method: "GET", headers: { Range: "bytes=0-0" } });
+                const bits = r.headers.get("X-Bit-Depth") || "?";
+                const rate = r.headers.get("X-Sample-Rate") || "?";
+                formatEl.textContent = `Format: ${bits}-bit / ${rate} Hz`;
+            } catch (e) {
+                formatEl.textContent = "Format: –";
+            }
         }
 
         function currentMode() {
@@ -199,6 +212,7 @@
                 url = SERVER + `${endpoint}?track_id=${url}`;
             }
 
+            showFormat(url);
             player.src = url;
             player.play().catch(e => setStatus("Play error: " + e.message));
             setStatus(`Playing (${mode}): ${url}`);
@@ -206,14 +220,18 @@
         }
 
         async function next() {
-            player.src = SERVER + "/queue/next_stream";
+            const url = SERVER + "/queue/next_stream";
+            showFormat(url);
+            player.src = url;
             player.play().catch(e => setStatus("Next error: " + e.message));
             setStatus("Skipped to next");
             setTimeout(refresh, 500);
         }
 
         async function prev() {
-            player.src = SERVER + "/queue/previous_stream";
+            const url = SERVER + "/queue/previous_stream";
+            showFormat(url);
+            player.src = url;
             player.play().catch(e => setStatus("Previous error: " + e.message));
             setStatus("Skipped to previous");
             setTimeout(refresh, 500);
