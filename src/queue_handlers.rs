@@ -97,6 +97,7 @@ pub async fn stream_from_track(
 ///
 /// Loads all tracks from the requested one to the end of the album into memory,
 /// then streams them as one continuous response.
+/// Prefers the upsampled copy of each track when it exists.
 pub async fn stream_from_track_gapless(
     State(state): State<crate::AppState>,
     Query(params): Query<StreamFromTrackParams>,
@@ -120,9 +121,10 @@ pub async fn stream_from_track_gapless(
         q.current = start_index;
     }
 
+    // Prefer upsampled version of each track, fall back to original.
     let paths: Vec<String> = tracks[start_index..]
         .iter()
-        .map(|t| t.path.clone())
+        .map(|t| crate::prefer_upsampled(&t.path))
         .collect();
 
     if paths.is_empty() {

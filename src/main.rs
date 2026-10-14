@@ -719,15 +719,29 @@ async fn library_scan(
 
 /// Full range-aware FLAC streaming.
 /// Supports `Range: bytes=start-end` and returns 206 Partial Content.
-pub async fn stream_local(
+/// Prefer the upsampled copy under …/upsampled/<filename> when it exists.
+fn prefer_upsampled(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    if let (Some(parent), Some(name)) = (p.parent(), p.file_name()) {
+        let up = parent.join("upsampled").join(name);
+        if up.exists() {
+            return up.to_string_lossy().into_owned();
+        }
+    }
+    path.to_string()
+}
+
+async fn stream_local(
     Query(params): Query<std::collections::HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
-    let path = params
+    let raw_path = params
         .get("path")
         .ok_or((StatusCode::BAD_REQUEST, "missing path".into()))?;
 
-    let bytes = tokio::fs::read(path)
+    let path = prefer_upsampled(raw_path);
+
+    let bytes = tokio::fs::read(&path)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
     let file_size = bytes.len() as u64;
@@ -779,9 +793,8 @@ pub async fn stream_local(
         .header(header::ACCEPT_RANGES, "bytes")
         .header(
             "Access-Control-Expose-Headers",
-            "Content-Range, Accept-Ranges, Content-Length, Content-Type",
-        )
-        .header(header::CACHE_CONTROL, "no-cache");
+            "Content-Range, Accept-Ranges, Content-Length",
+        );
 
     if status == StatusCode::PARTIAL_CONTENT {
         builder = builder.header(
@@ -790,7 +803,9 @@ pub async fn stream_local(
         );
     }
 
-    Ok(builder.body(Body::from(slice)).unwrap())
+    builder
+        .body(Body::from(slice))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 /// GET /upsample_track?track_id=13176086
