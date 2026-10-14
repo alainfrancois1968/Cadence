@@ -791,7 +791,7 @@ async fn stream_local(
         } else {
             match serde_json::from_str::<crate::eq::EqSettings>(&json) {
                 Ok(settings) if !crate::eq::is_flat(&settings) => {
-                    match decode_and_eq(&bytes, &settings) {
+                    match decode_and_eq(&path, &settings) {
                         Ok((wav, _)) => (wav, "audio/wav"),
                         Err(e) => {
                             tracing::warn!("EQ failed, falling back to FLAC: {}", e);
@@ -869,23 +869,25 @@ async fn stream_local(
 }
 
 /// Decode FLAC bytes, apply EQ, return WAV bytes and sample rate.
-fn decode_and_eq(flac_bytes: &[u8], settings: &crate::eq::EqSettings) -> Result<(Vec<u8>, u32), String> {
+fn decode_and_eq(path: &str, settings: &crate::eq::EqSettings) -> Result<(Vec<u8>, u32), String> {
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
     use symphonia::core::probe::Hint;
-    use std::io::Cursor;
+    use std::fs::File;
 
-    let cursor = Cursor::new(flac_bytes.to_vec());
-    let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
+    tracing::info!("decode_and_eq: opening {}", path);
+
+    let file = File::open(path).map_err(|e| format!("open: {}", e))?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
     hint.with_extension("flac");
 
     let probed = symphonia::default::get_probe()
         .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("probe: {}", e))?;
 
     let mut format = probed.format;
     let track = format
@@ -896,9 +898,10 @@ fn decode_and_eq(flac_bytes: &[u8], settings: &crate::eq::EqSettings) -> Result<
 
     let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
     let track_id = track.id;
+
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("decoder: {}", e))?;
 
     let mut pcm = Vec::new();
     loop {
