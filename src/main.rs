@@ -761,27 +761,36 @@ async fn stream_local(
         .get("path")
         .ok_or((StatusCode::BAD_REQUEST, "missing path".into()))?;
 
-    let path = prefer_upsampled(raw_path);
+    // Look up EQ against the original path (presets are stored there).
+    let track_eq = state.library.get_eq_settings(raw_path).await.ok().flatten();
 
-    let bytes = tokio::fs::read(&path)
-        .await
-        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
-
-    // 1. Track-level EQ
-    let track_eq = state.library.get_eq_settings(&path).await.ok().flatten();
-
-    // 2. Fall back to global if track has nothing
     let eq_json = if track_eq.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
         std::fs::read_to_string("eq_global.json").ok()
     } else {
         track_eq.clone()
     };
 
+    // When EQ is active, always decode the original file.
+    let eq_active = eq_json
+        .as_ref()
+        .map(|s| !s.trim().is_empty() && s.trim() != "{}")
+        .unwrap_or(false);
+
+    let path = if eq_active {
+        raw_path.clone()
+    } else {
+        prefer_upsampled(raw_path)
+    };
+
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+
     tracing::info!(
-        "raw_path={}, resolved={}, track_eq={:?}, eq_json={:?}",
+        "raw_path={}, resolved={}, eq_active={}, eq_json={:?}",
         raw_path,
         path,
-        track_eq,
+        eq_active,
         eq_json.as_deref()
     );
 
