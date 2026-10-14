@@ -1135,39 +1135,22 @@ fn encode_flac_bits(
     channels: usize,
     bit_depth: usize,
 ) -> Result<Vec<u8>, String> {
-    use flacenc::component::BitRepr;
-    use flacenc::error::Verify;
+    use libflac_rs::{Encoder, EncoderConfig};
 
     let max = (1i32 << (bit_depth - 1)) - 1;
     let scale = max as f32;
-
     let samples: Vec<i32> = pcm
         .iter()
-        .map(|&s| {
-            let clamped = s.clamp(-1.0, 1.0);
-            (clamped * scale).round() as i32
-        })
+        .map(|&s| (s.clamp(-1.0, 1.0) * scale).round() as i32)
         .collect();
 
-    let config = flacenc::config::Encoder::default()
-        .into_verified()
-        .map_err(|e| format!("{:?}", e))?;
+    let enc = Encoder::new(EncoderConfig::new(
+        channels as u32,
+        bit_depth as u32,
+        sample_rate as u32,
+    ));
 
-    let source = flacenc::source::MemSource::from_samples(
-        &samples,
-        channels,
-        bit_depth,
-        sample_rate,
-    );
-
-    let flac_stream = flacenc::encode_with_fixed_block_size(&config, source, config.block_size)
-        .map_err(|e| format!("{:?}", e))?;
-
-    let mut sink = flacenc::bitsink::ByteSink::new();
-    flac_stream
-        .write(&mut sink)
-        .map_err(|e| format!("{:?}", e))?;
-    Ok(sink.as_slice().to_vec())
+    Ok(enc.encode(&samples))
 }
 
 fn copy_tags(src: &PathBuf, dest: &PathBuf) -> Result<(), String> {
