@@ -3,7 +3,7 @@ use axum::{
     extract::{Query, State},
     http::{header, HeaderMap, StatusCode},
     response::Response,
-    routing::get,
+    routing::{get, post},
     Router,
     Json
 };
@@ -25,6 +25,8 @@ use qobuz::QobuzSource;
 use queue::PlayQueue;
 
 use std::env;
+
+mod eq;
 
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::picture::{MimeType, Picture, PictureType};
@@ -58,6 +60,17 @@ struct UpsampleAlbumParams {
     album_id: String,
 }
 
+#[derive(Deserialize)]
+struct EqPresetParams {
+    path: String,
+    seq: String, // "00", "01", ...
+}
+
+#[derive(Deserialize)]
+struct GlobalEqParams {
+    seq: String,
+}
+
 /// Kill any previous process listening on port 3000 so a new run can bind.
 fn kill_previous_instance() {
     if let Ok(output) = std::process::Command::new("lsof")
@@ -82,6 +95,10 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     kill_previous_instance();
+
+    if !std::path::Path::new("eq_global.json").exists() {
+        let _ = std::fs::write("eq_global.json", "{}");
+    }
 
     dotenvy::dotenv().ok();
 
@@ -125,6 +142,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/queue/clear", axum::routing::post(queue_handlers::queue_clear))
         .route("/upsample_track", get(upsample_track))
         .route("/upsample_album", get(upsample_album))
+        .route("/library/eq/apply", post(apply_eq_preset))
+        .route("/library/eq/presets", get(list_eq_presets))
+        .route("/library/eq/global", post(set_global_eq))
+        .route("/library/eq/global", get(get_global_eq))
         .route(
             "/qobuz/queue-albums-from-artists",
             get(qobuz_queue_albums_from_artists),
@@ -248,7 +269,7 @@ async fn qobuz_stream(
 
     let mut q = std::collections::HashMap::new();
     q.insert("path".to_string(), path);
-    stream_local(Query(q), headers).await
+    stream_local(State(state), Query(q), headers).await
 }
 
 async fn qobuz_download(
@@ -732,6 +753,7 @@ fn prefer_upsampled(path: &str) -> String {
 }
 
 async fn stream_local(
+    State(state): State<AppState>,
     Query(params): Query<std::collections::HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
@@ -744,7 +766,47 @@ async fn stream_local(
     let bytes = tokio::fs::read(&path)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
-    let file_size = bytes.len() as u64;
+
+    // 1. Track-level EQ
+    let track_eq = state.library.get_eq_settings(&path).await.ok().flatten();
+
+    // 2. Fall back to global if track has nothing
+    let eq_json = if track_eq.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+        std::fs::read_to_string("eq_global.json").ok()
+    } else {
+        track_eq.clone()
+    };
+
+    tracing::info!(
+        "raw_path={}, resolved={}, track_eq={:?}, eq_json={:?}",
+        raw_path,
+        path,
+        track_eq,
+        eq_json.as_deref()
+    );
+
+    let (body_bytes, content_type) = if let Some(json) = eq_json {
+        if json.trim().is_empty() || json.trim() == "{}" {
+            (bytes, "audio/flac")
+        } else {
+            match serde_json::from_str::<crate::eq::EqSettings>(&json) {
+                Ok(settings) if !crate::eq::is_flat(&settings) => {
+                    match decode_and_eq(&bytes, &settings) {
+                        Ok((wav, _)) => (wav, "audio/wav"),
+                        Err(e) => {
+                            tracing::warn!("EQ failed, falling back to FLAC: {}", e);
+                            (bytes, "audio/flac")
+                        }
+                    }
+                }
+                _ => (bytes, "audio/flac"),
+            }
+        }
+    } else {
+        (bytes, "audio/flac")
+    };
+
+    let file_size = body_bytes.len() as u64;
 
     let mut status = StatusCode::OK;
     let mut start: u64 = 0;
@@ -753,7 +815,6 @@ async fn stream_local(
 
     if let Some(range_header) = headers.get(header::RANGE) {
         if let Ok(range_str) = range_header.to_str() {
-            tracing::info!("Range request: {}", range_str);
             if let Some(range) = range_str.strip_prefix("bytes=") {
                 let parts: Vec<&str> = range.split('-').collect();
                 if parts.len() == 2 {
@@ -778,17 +839,16 @@ async fn stream_local(
                     }
                     content_length = end - start + 1;
                     status = StatusCode::PARTIAL_CONTENT;
-                    tracing::info!("Serving range {}-{} / {}", start, end, file_size);
                 }
             }
         }
     }
 
-    let slice = bytes[start as usize..=end as usize].to_vec();
+    let slice = body_bytes[start as usize..=end as usize].to_vec();
 
     let mut builder = Response::builder()
         .status(status)
-        .header(header::CONTENT_TYPE, "audio/flac")
+        .header(header::CONTENT_TYPE, content_type)
         .header(header::CONTENT_LENGTH, content_length)
         .header(header::ACCEPT_RANGES, "bytes")
         .header(
@@ -806,6 +866,61 @@ async fn stream_local(
     builder
         .body(Body::from(slice))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// Decode FLAC bytes, apply EQ, return WAV bytes and sample rate.
+fn decode_and_eq(flac_bytes: &[u8], settings: &crate::eq::EqSettings) -> Result<(Vec<u8>, u32), String> {
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::codecs::DecoderOptions;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+    use std::io::Cursor;
+
+    let cursor = Cursor::new(flac_bytes.to_vec());
+    let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
+    let mut hint = Hint::new();
+    hint.with_extension("flac");
+
+    let probed = symphonia::default::get_probe()
+        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .map_err(|e| e.to_string())?;
+
+    let mut format = probed.format;
+    let track = format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.sample_rate.is_some())
+        .ok_or("no audio track")?;
+
+    let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
+    let track_id = track.id;
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .map_err(|e| e.to_string())?;
+
+    let mut pcm = Vec::new();
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let mut buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
+        buf.copy_interleaved_ref(decoded);
+        pcm.extend_from_slice(buf.samples());
+    }
+
+    let processed = crate::eq::apply_eq(&pcm, sample_rate, settings);
+    let wav = crate::eq::to_wav(&processed, sample_rate);
+    Ok((wav, sample_rate))
 }
 
 /// GET /upsample_track?track_id=13176086
@@ -1156,4 +1271,90 @@ async fn upsample_album(
         "tracks": results,
         "status": "ok"
     })))
+}
+
+async fn apply_eq_preset(
+    State(state): State<AppState>,
+    Query(params): Query<EqPresetParams>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let presets: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string("eq_presets.json").map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("presets: {}", e))
+        })?,
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let seq = if params.seq == "00" { "00" } else { &params.seq };
+
+    let preset = presets
+        .get(seq)
+        .ok_or((StatusCode::BAD_REQUEST, format!("unknown preset {}", seq)))?;
+
+    // Store the full preset object (name + left + right) on the track
+    let settings_json = preset.to_string();
+
+    if seq == "00" {
+        // Explicitly clear EQ
+        state
+            .library
+            .set_eq_settings(&params.path, "")
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    } else {
+        state
+            .library
+            .set_eq_settings(&params.path, &settings_json)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "seq": seq,
+        "name": preset.get("name").and_then(|n| n.as_str()).unwrap_or("unknown")
+    })))
+}
+
+async fn list_eq_presets() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let raw = std::fs::read_to_string("eq_presets.json")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let presets: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(presets))
+}
+
+async fn set_global_eq(
+    Query(params): Query<GlobalEqParams>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let presets: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string("eq_presets.json")
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if params.seq == "00" {
+        std::fs::write("eq_global.json", "{}")
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        return Ok(Json(serde_json::json!({ "status": "ok", "seq": "00", "name": "No EQ" })));
+    }
+
+    let preset = presets
+        .get(&params.seq)
+        .ok_or((StatusCode::BAD_REQUEST, format!("unknown preset {}", params.seq)))?;
+
+    std::fs::write("eq_global.json", preset.to_string())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "seq": params.seq,
+        "name": preset.get("name").and_then(|n| n.as_str()).unwrap_or("unknown")
+    })))
+}
+
+async fn get_global_eq() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let raw = std::fs::read_to_string("eq_global.json").unwrap_or_else(|_| "{}".into());
+    let v: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
+    Ok(Json(v))
 }

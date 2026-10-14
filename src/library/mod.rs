@@ -384,6 +384,24 @@ impl Library {
                 .await?;
         Ok(row.unwrap_or((None, None)))
     }
+
+    pub async fn get_eq_settings(&self, path: &str) -> Result<Option<String>, sqlx::Error> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT eq_settings FROM tracks WHERE path = ?")
+                .bind(path)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.and_then(|(s,)| s))
+    }
+
+    pub async fn set_eq_settings(&self, path: &str, settings: &str) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE tracks SET eq_settings = ? WHERE path = ?")
+            .bind(settings)
+            .bind(path)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }
 
 /// Compute stereo peak arrays and return JSON {"l":[...],"r":[...]}.

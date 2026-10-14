@@ -73,7 +73,7 @@ pub async fn stream_from_track(
     // Stream via existing stream_local.
     let mut qparams = std::collections::HashMap::new();
     qparams.insert("path".to_string(), current.path.clone());
-    let mut resp = crate::stream_local(Query(qparams), headers).await?;
+    let mut resp = crate::stream_local(State(state.clone()), Query(qparams), headers).await?;
 
     let (next_id, idx, len) = {
         let q = state.queue.lock().await;
